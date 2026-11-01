@@ -1,0 +1,10 @@
+check,status,details
+Stage 7 recursive predictions available,PASS,24948 valid prediction rows loaded.
+Stage 11 pipeline verification report folder found,PASS,6 files found.
+Stage 12 reliability summary available,PASS,Stage 12 summary loaded.
+Stage 13 error analysis summary available,PASS,Stage 13 summary loaded.
+Stage 14 bias correction summary available,PASS,Stage 14 summary loaded.
+Cross-origin corrected predictions available,PASS,Cross-origin predictions loaded and evaluated.
+Feature mapping fully verified,NOT VERIFIED,"Stage 11 established identical pipeline outputs and 101 transformed columns, but matching output dimensions alone do not prove the complete feature mapping."
+Inventory recommendations validated against real stock,NOT VERIFIED,"Actual stock-on-hand, purchase orders, SKU-level data, and supplier lead-time records are not confirmed available."
+Bias correction validated across many future periods,NOT VERIFIED,The saved backtest contains only two forecast origins.

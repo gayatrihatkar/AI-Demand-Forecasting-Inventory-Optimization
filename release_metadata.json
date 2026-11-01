@@ -1,0 +1,11 @@
+{
+  "project_name": "AI-Powered Demand Forecasting and Inventory Optimization System for Supermarket Retail",
+  "release_stage": "Stage 16B",
+  "original_project_preserved": true,
+  "model_type": "Original scikit-learn Pipeline with XGBRegressor",
+  "pipeline_input_features": 16,
+  "deployment_model": "models/best_demand_model.joblib",
+  "historical_data": "data/sales_clean.parquet",
+  "forecasting_note": "Future forecasts must be generated recursively. Saved backtesting predictions are evaluation results, not future operational forecasts.",
+  "inventory_note": "Inventory recommendations are estimates based on user-configurable planning assumptions."
+}

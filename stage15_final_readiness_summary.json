@@ -1,0 +1,107 @@
+{
+  "stage": 15,
+  "title": "Final Model Selection and Forecasting Readiness Audit",
+  "created_outputs_in": "/content/drive/MyDrive/AI_Demand_Forecasting_RESEARCH_V2/reports/stage15_final_readiness_audit",
+  "original_recursive_backtest_metrics": {
+    "observations": 24948,
+    "MAE": 55.58286700537278,
+    "RMSE": 187.1378906959005,
+    "WAPE_percent": 23.282115031927113,
+    "bias_predicted_minus_actual": 34.378004673032734,
+    "overforecast_rate_percent": 76.76767676767676
+  },
+  "cross_origin_metrics": {
+    "original": {
+      "observations": 24948,
+      "MAE": 55.58286700537278,
+      "RMSE": 187.1378906959005,
+      "WAPE_percent": 23.282115031927113,
+      "bias_predicted_minus_actual": 34.378004673032734,
+      "overforecast_rate_percent": 76.76767676767676
+    },
+    "cross_origin_corrected": {
+      "observations": 24948,
+      "MAE": 53.036350352409244,
+      "RMSE": 171.2217866942997,
+      "WAPE_percent": 22.21545012528809,
+      "bias_predicted_minus_actual": -0.027906895290607657,
+      "overforecast_rate_percent": 66.34199134199135
+    }
+  },
+  "cross_origin_metric_improvement": {
+    "MAE": {
+      "original": 55.58286700537278,
+      "corrected": 53.036350352409244,
+      "absolute_change": -2.5465166529635397,
+      "improvement_percent": 4.581477692968567
+    },
+    "RMSE": {
+      "original": 187.1378906959005,
+      "corrected": 171.2217866942997,
+      "absolute_change": -15.916104001600786,
+      "improvement_percent": 8.505014106130163
+    },
+    "WAPE_percent": {
+      "original": 23.282115031927113,
+      "corrected": 22.21545012528809,
+      "absolute_change": -1.0666649066390228,
+      "improvement_percent": 4.58147769296857
+    }
+  },
+  "cross_origin_count": 2,
+  "readiness_checklist": [
+    {
+      "check": "Stage 7 recursive predictions available",
+      "status": "PASS",
+      "details": "24948 valid prediction rows loaded."
+    },
+    {
+      "check": "Stage 11 pipeline verification report folder found",
+      "status": "PASS",
+      "details": "6 files found."
+    },
+    {
+      "check": "Stage 12 reliability summary available",
+      "status": "PASS",
+      "details": "Stage 12 summary loaded."
+    },
+    {
+      "check": "Stage 13 error analysis summary available",
+      "status": "PASS",
+      "details": "Stage 13 summary loaded."
+    },
+    {
+      "check": "Stage 14 bias correction summary available",
+      "status": "PASS",
+      "details": "Stage 14 summary loaded."
+    },
+    {
+      "check": "Cross-origin corrected predictions available",
+      "status": "PASS",
+      "details": "Cross-origin predictions loaded and evaluated."
+    },
+    {
+      "check": "Feature mapping fully verified",
+      "status": "NOT VERIFIED",
+      "details": "Stage 11 established identical pipeline outputs and 101 transformed columns, but matching output dimensions alone do not prove the complete feature mapping."
+    },
+    {
+      "check": "Inventory recommendations validated against real stock",
+      "status": "NOT VERIFIED",
+      "details": "Actual stock-on-hand, purchase orders, SKU-level data, and supplier lead-time records are not confirmed available."
+    },
+    {
+      "check": "Bias correction validated across many future periods",
+      "status": "NOT VERIFIED",
+      "details": "The saved backtest contains only two forecast origins."
+    }
+  ],
+  "model_decision": "Keep the original trained pipeline as the baseline. Treat bias correction as experimental until it is tested on more rolling forecast origins.",
+  "important_limitations": [
+    "Only two forecast origins are available in the saved backtest.",
+    "The research XGBoost standalone model input mapping remains unresolved.",
+    "Matching transformed feature counts do not prove exact feature mapping.",
+    "Inventory optimization is simulated without verified real stock data.",
+    "No model was retrained, overwritten, or modified."
+  ]
+}
