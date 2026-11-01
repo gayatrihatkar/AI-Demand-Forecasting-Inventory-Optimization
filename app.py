@@ -128,14 +128,31 @@ def find_report(name: str):
     return None
 
 def find_model_files():
+    """Discover saved model pipelines in the repository root and model folders."""
     found = {}
-    for root in MODEL_DIRS:
+    roots = [APP_DIR, *MODEL_DIRS]
+    seen_paths = set()
+    for root in roots:
         if not root.exists():
             continue
-        for p in root.glob("*.joblib"):
+        for p in root.rglob("*.joblib"):
+            try:
+                resolved = str(p.resolve())
+            except Exception:
+                resolved = str(p)
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
             key = p.stem.lower()
-            # Prefer explicitly selected best model if duplicate filenames exist.
-            if key not in found or "best" in p.stem:
+            # Keep a single entry per model filename; prefer the explicit models/ copy,
+            # then the best_demand_model artifact if duplicates are present.
+            current = found.get(key)
+            prefer_new = (
+                current is None
+                or (p.parent.name.lower() == "models" and current.parent.name.lower() != "models")
+                or ("best" in p.stem.lower() and "best" not in current.stem.lower())
+            )
+            if prefer_new:
                 found[key] = p
     return found
 
@@ -322,10 +339,10 @@ def make_features(store, family, forecast_date, history, promotion=0.0):
         "sales_rolling_std_7": float(np.std(last7, ddof=1)) if len(last7) > 1 else 0.0,
     }
 
-@st.cache_data(show_spinner="Generating forecasts (batched model prediction)...", ttl=3600, max_entries=12)
+@st.cache_data(show_spinner="Generating recursive forecasts...")
 def generate_forecast(
     data_fingerprint: str,
-    _data: pd.DataFrame,
+    data: pd.DataFrame,
     model_path: str,
     model_mtime: float,
     horizon: int,
@@ -333,29 +350,17 @@ def generate_forecast(
     families: tuple,
     promotion_mode: str,
 ):
-    """
-    Generate recursive forecasts efficiently.
-
-    The previous implementation called model.predict once for every
-    store-family pair on every forecast day. With 54 stores and 33 families,
-    that can mean 12,000+ tiny model calls for a 7-day forecast. This version
-    makes one batch prediction per forecast day while preserving recursive
-    lag updates.
-    """
     model = load_model(model_path, model_mtime)
-    sub = _data[
-        _data["store_nbr"].isin(stores) & _data["family"].isin(families)
-    ].copy()
-
-    daily = (
-        sub.groupby(["date", "store_nbr", "family"], as_index=False, observed=True)
-        .agg(sales=("sales", "sum"), onpromotion=("onpromotion", "sum"))
+    sub = data[data["store_nbr"].isin(stores) & data["family"].isin(families)].copy()
+    # Preserve full daily series per selected store-family; missing historical dates become zero.
+    daily = sub.groupby(["date", "store_nbr", "family"], as_index=False, observed=True).agg(
+        sales=("sales", "sum"), onpromotion=("onpromotion", "sum")
     )
     all_dates = pd.date_range(first_history_date, last_history_date, freq="D")
     indexed = daily.set_index(["store_nbr", "family", "date"]).sort_index()
+    rows = []
+    start = last_history_date + pd.Timedelta(days=1)
 
-    # Prepare the history and recent promotion series for each requested pair.
-    pairs = []
     for store in stores:
         for family in families:
             try:
@@ -365,70 +370,32 @@ def generate_forecast(
             except KeyError:
                 history_series = pd.Series(dtype=float)
                 promo_series = pd.Series(dtype=float)
-
             history_series.index = pd.to_datetime(history_series.index)
             history_series = history_series.groupby(level=0).sum().reindex(all_dates, fill_value=0.0)
             promo_series.index = pd.to_datetime(promo_series.index)
             promo_series = promo_series.groupby(level=0).sum().reindex(all_dates, fill_value=0.0)
+            history = {pd.Timestamp(d): float(v) for d, v in history_series.items()}
 
-            pairs.append({
-                "store": int(store),
-                "family": str(family),
-                "history": {pd.Timestamp(d): float(v) for d, v in history_series.items()},
-                "promo_recent_7": float(promo_series.tail(7).max()) if len(promo_series) else 0.0,
-                "promo_recent_28": float(promo_series.tail(28).mean()) if len(promo_series) else 0.0,
-            })
+            for step in range(horizon):
+                fdate = start + pd.Timedelta(days=step)
+                if promotion_mode == "Use recent average":
+                    promo = float(promo_series.tail(28).mean()) if len(promo_series) else 0.0
+                elif promotion_mode == "Zero promotion":
+                    promo = 0.0
+                else:
+                    promo = float(promo_series.tail(7).max()) if len(promo_series) else 0.0
 
-    rows = []
-    forecast_start = last_history_date + pd.Timedelta(days=1)
-
-    for step in range(int(horizon)):
-        forecast_date = forecast_start + pd.Timedelta(days=step)
-        feature_rows = []
-        for pair in pairs:
-            if promotion_mode == "Use recent average":
-                promo = pair["promo_recent_28"]
-            elif promotion_mode == "Zero promotion":
-                promo = 0.0
-            else:
-                promo = pair["promo_recent_7"]
-
-            feature_rows.append(
-                make_features(
-                    pair["store"], pair["family"], forecast_date,
-                    pair["history"], promo
-                )
-            )
-
-        if not feature_rows:
-            return pd.DataFrame()
-
-        X = pd.DataFrame(feature_rows, columns=FEATURES)
-        predictions = np.asarray(model.predict(X), dtype=float).reshape(-1)
-        if len(predictions) != len(pairs):
-            raise ValueError(
-                f"Model returned {len(predictions)} predictions for {len(pairs)} store-family pairs."
-            )
-
-        for pair, raw_pred in zip(pairs, predictions):
-            pred = max(0.0, float(raw_pred)) if np.isfinite(raw_pred) else 0.0
-            rows.append({
-                "forecast_date": forecast_date,
-                "store_nbr": pair["store"],
-                "family": pair["family"],
-                "forecast_demand": pred,
-                "raw_prediction": float(raw_pred) if np.isfinite(raw_pred) else np.nan,
-                "onpromotion_assumption": (
-                    pair["promo_recent_28"] if promotion_mode == "Use recent average"
-                    else 0.0 if promotion_mode == "Zero promotion"
-                    else pair["promo_recent_7"]
-                ),
-                "horizon_day": step + 1,
-                "model": Path(model_path).stem,
-            })
-            # Recursive update: tomorrow's lag features use today's prediction.
-            pair["history"][forecast_date] = pred
-
+                feat = make_features(store, family, fdate, history, promo)
+                X = pd.DataFrame([feat], columns=FEATURES)
+                raw_pred = float(np.asarray(model.predict(X)).reshape(-1)[0])
+                pred = max(0.0, raw_pred) if np.isfinite(raw_pred) else 0.0
+                rows.append({
+                    "forecast_date": fdate, "store_nbr": int(store), "family": str(family),
+                    "forecast_demand": pred, "raw_prediction": raw_pred,
+                    "onpromotion_assumption": promo, "horizon_day": step + 1,
+                    "model": Path(model_path).stem,
+                })
+                history[fdate] = pred
     result = pd.DataFrame(rows)
     if not result.empty:
         result["forecast_date"] = pd.to_datetime(result["forecast_date"])
@@ -465,6 +432,94 @@ def metrics_from_backtest(df):
         "Bias (predicted − actual)": float(np.mean(p-a)),
         "Rows": int(len(a)),
     }
+
+@st.cache_data(show_spinner="Evaluating saved models on a chronological holdout...", ttl=3600, max_entries=4)
+def evaluate_saved_models(
+    data_fingerprint: str,
+    _data: pd.DataFrame,
+    model_specs: tuple,
+    validation_days: int = 28,
+):
+    """
+    Compare saved model artifacts on the same final chronological holdout.
+    Uses actual historical lag values for one-step-ahead evaluation; this is
+    explicitly not a recursive multi-day forecast benchmark.
+    """
+    data = _data[["date", "store_nbr", "family", "sales", "onpromotion"]].copy()
+    data["date"] = pd.to_datetime(data["date"]).dt.normalize()
+    data = data.sort_values(["store_nbr", "family", "date"])
+    end_date = data["date"].max()
+    validation_start = end_date - pd.Timedelta(days=validation_days - 1)
+    validation = data[data["date"].between(validation_start, end_date)].copy()
+    if validation.empty:
+        return pd.DataFrame(), f"No rows found in the last {validation_days} days."
+
+    # Per-series actual history dictionary. Each prediction only reads dates
+    # strictly earlier than its target date, so target sales cannot leak into lags.
+    history_by_pair = {}
+    for (store, family), grp in data.groupby(["store_nbr", "family"], sort=False, observed=True):
+        history_by_pair[(int(store), str(family))] = {
+            pd.Timestamp(d): float(v) for d, v in zip(grp["date"], grp["sales"])
+        }
+
+    feature_rows = []
+    for row in validation.itertuples(index=False):
+        pair_history = history_by_pair.get((int(row.store_nbr), str(row.family)), {})
+        feature_rows.append(
+            make_features(
+                int(row.store_nbr),
+                str(row.family),
+                pd.Timestamp(row.date),
+                pair_history,
+                float(row.onpromotion),
+            )
+        )
+    X = pd.DataFrame(feature_rows, columns=FEATURES)
+    y = pd.to_numeric(validation["sales"], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(y)
+    X = X.loc[valid].reset_index(drop=True)
+    y = y[valid]
+    if len(y) == 0:
+        return pd.DataFrame(), "No valid target sales were available for evaluation."
+
+    result_rows = []
+    errors = []
+    for label, path_str, mtime in model_specs:
+        try:
+            model = load_model(path_str, float(mtime))
+            pred = np.asarray(model.predict(X), dtype=float).reshape(-1)
+            if len(pred) != len(y):
+                raise ValueError(f"Expected {len(y)} predictions but got {len(pred)}.")
+            pred = np.where(np.isfinite(pred), np.maximum(pred, 0.0), 0.0)
+            abs_err = np.abs(y - pred)
+            denom = float(np.abs(y).sum())
+            result_rows.append({
+                "Model": label,
+                "MAE": float(abs_err.mean()),
+                "RMSE": float(np.sqrt(np.mean((y - pred) ** 2))),
+                "WAPE (%)": float(abs_err.sum() / denom * 100) if denom else np.nan,
+                "Bias (predicted − actual)": float(np.mean(pred - y)),
+                "Evaluation rows": int(len(y)),
+                "Validation start": validation_start.date().isoformat(),
+                "Validation end": end_date.date().isoformat(),
+                "Evaluation protocol": "One-step-ahead; actual prior sales used for lags",
+                "Status": "OK",
+            })
+        except Exception as exc:
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
+            result_rows.append({
+                "Model": label, "MAE": np.nan, "RMSE": np.nan, "WAPE (%)": np.nan,
+                "Bias (predicted − actual)": np.nan, "Evaluation rows": int(len(y)),
+                "Validation start": validation_start.date().isoformat(),
+                "Validation end": end_date.date().isoformat(),
+                "Evaluation protocol": "One-step-ahead; actual prior sales used for lags",
+                "Status": f"Could not evaluate: {type(exc).__name__}",
+            })
+    results = pd.DataFrame(result_rows)
+    if not results.empty and "WAPE (%)" in results:
+        results = results.sort_values("WAPE (%)", ascending=True, na_position="last").reset_index(drop=True)
+    return results, "\\n".join(errors)
+
 
 def save_csv(df: pd.DataFrame, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -556,24 +611,12 @@ if page == "Executive Overview":
 
     forecast_horizon = st.selectbox("Forecast horizon", [7, 14, 30, 60], index=0, format_func=lambda x: f"{x} days", key="overview_horizon")
     st.session_state.forecast_horizon = forecast_horizon
-    st.caption(
-        f"Forecast scope: {len(selected_stores)} stores × {len(selected_families)} product families. "
-        "Forecasts are generated in batches and cached for repeated dashboard navigation."
-    )
 
     actual_total = float(filtered["sales"].sum()) if not filtered.empty else 0.0
     daily_avg = float(filtered.groupby("date")["sales"].sum().mean()) if not filtered.empty else 0.0
-    try:
-        fc = current_forecast(forecast_horizon)
-        fc_total = float(fc["forecast_demand"].sum()) if not fc.empty else 0.0
-        model = load_model(
-            st.session_state.selected_model_path,
-            Path(st.session_state.selected_model_path).stat().st_mtime
-        )
-    except Exception as exc:
-        st.error("Forecast generation or model loading failed.")
-        st.exception(exc)
-        st.stop()
+    fc = current_forecast(forecast_horizon)
+    fc_total = float(fc["forecast_demand"].sum()) if not fc.empty else 0.0
+    model = load_model(st.session_state.selected_model_path, Path(st.session_state.selected_model_path).stat().st_mtime)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Historical sales in scope", money(actual_total))
@@ -799,60 +842,102 @@ elif page == "What-if Simulator":
             st.success("Scenario and assumptions saved.")
 
 elif page == "Model Evaluation":
-    show_hero("Model Evaluation", "Use saved validation and chronological backtesting evidence; do not confuse one-step and recursive metrics.")
+    show_hero(
+        "Model Evaluation",
+        "Compare the saved model pipelines using the same chronological holdout and transparent error metrics."
+    )
+
+    st.markdown("### Saved model artifacts")
+    artifact_rows = []
+    for label, path in sorted(model_options.items()):
+        artifact_rows.append({
+            "Model": label,
+            "Artifact": path.name,
+            "Location": str(path.relative_to(APP_DIR)) if path.is_relative_to(APP_DIR) else str(path),
+            "File size (MB)": round(path.stat().st_size / (1024 * 1024), 2),
+        })
+    st.dataframe(pd.DataFrame(artifact_rows), use_container_width=True, hide_index=True)
+    st.caption(
+        "The app evaluates every distinct .joblib artifact it discovers in the repository root and model folders. "
+        "If fewer than six artifacts are present in the deployed repository, this page cannot display six distinct trained models."
+    )
+
+    st.markdown("### Model comparison")
+    st.caption(
+        "Metrics below are calculated from a chronological holdout using the same dates for each model. "
+        "This is one-step-ahead evaluation: actual sales from earlier dates are available for lag features. "
+        "It is not the same as a recursive 7-day forecast."
+    )
+
+    model_specs = tuple(
+        (label, str(path), float(path.stat().st_mtime))
+        for label, path in sorted(model_options.items())
+    )
+    fingerprint = f"{DATA_PATH}:{DATA_PATH.stat().st_mtime}:{len(sales_all)}"
+    validation_days = st.selectbox("Chronological validation window", [7, 14, 28], index=2, key="evaluation_days")
+
+    if st.button("Run model comparison", type="primary"):
+        st.session_state["run_saved_model_evaluation"] = True
+
+    if st.session_state.get("run_saved_model_evaluation", True):
+        try:
+            comparison, eval_errors = evaluate_saved_models(
+                fingerprint, sales_all, model_specs, int(validation_days)
+            )
+            if not comparison.empty:
+                good = comparison[comparison["Status"] == "OK"].copy()
+                if not good.empty:
+                    best = good.iloc[0]
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("Best evaluated model (lowest WAPE)", str(best["Model"]))
+                    k2.metric("Best WAPE", f"{best['WAPE (%)']:.2f}%")
+                    k3.metric("Best MAE", f"{best['MAE']:,.3f}")
+                    k4.metric("Models evaluated", f"{len(good)} / {len(comparison)}")
+
+                    chart_df = good.sort_values("WAPE (%)", ascending=True)
+                    fig = px.bar(
+                        chart_df, x="WAPE (%)", y="Model", orientation="h",
+                        title="Chronological holdout comparison — lower WAPE is better",
+                        text="WAPE (%)",
+                    )
+                    fig.update_traces(marker_color=C["teal"], texttemplate="%{text:.2f}%")
+                    fig.update_layout(yaxis={"categoryorder": "total ascending"})
+                    chart_layout(fig, max(380, 48 * len(chart_df)))
+                st.dataframe(comparison, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "Download model comparison metrics",
+                    comparison.to_csv(index=False).encode("utf-8"),
+                    file_name=f"model_comparison_{validation_days}d.csv",
+                    mime="text/csv",
+                )
+                if eval_errors:
+                    with st.expander("Model loading/evaluation errors"):
+                        st.code(eval_errors)
+            else:
+                st.warning("No model metrics could be calculated. Check the deployed model artifacts and logs.")
+        except Exception as exc:
+            st.error("Model evaluation failed.")
+            st.exception(exc)
+
+    st.markdown("### Previously saved research reports")
     if not model_comparison.empty:
-        st.markdown("### Saved model comparison")
-        st.caption("Loaded from project evaluation reports. Values are not recalculated here unless raw predictions are available.")
+        st.write("Saved model comparison report:")
         st.dataframe(model_comparison, use_container_width=True, hide_index=True)
-        metric_col = next((x for x in model_comparison.columns if x.lower().replace("_", "").startswith("wape")), None)
-        model_col = next((x for x in model_comparison.columns if x.lower() in {"model", "model_name", "name"}), model_comparison.columns[0])
-        if metric_col:
-            fig = px.bar(model_comparison.sort_values(metric_col, ascending=False), x=metric_col, y=model_col, orientation="h", title="Model comparison — lower WAPE is better")
-            fig.update_traces(marker_color=C["blue"])
-            chart_layout(fig, 390)
     else:
-        st.warning("Model comparison report was not found. No comparison values are fabricated.")
-    if not backtest.empty:
-        metrics = metrics_from_backtest(backtest)
-        if metrics:
-            st.markdown("### Recursive chronological backtesting")
-            st.caption("Metrics calculated from the saved recursive prediction rows.")
-            cols = st.columns(5)
-            for col, key in zip(cols, ["MAE", "RMSE", "WAPE", "Bias (predicted − actual)", "Rows"]):
-                val = metrics[key]
-                col.metric(key, f"{val:.3f}%" if key == "WAPE" else (f"{val:,.3f}" if key != "Rows" else f"{val:,}"))
-            eval_df = backtest.copy()
-            if "horizon_step" in eval_df:
-                eval_df["horizon_step"] = pd.to_numeric(eval_df["horizon_step"], errors="coerce")
-                by_h = eval_df.groupby("horizon_step").apply(
-                    lambda x: pd.Series({
-                        "MAE": np.mean(np.abs(x["actual_sales"] - x["predicted_sales"])),
-                        "RMSE": np.sqrt(np.mean((x["actual_sales"] - x["predicted_sales"])**2)),
-                        "WAPE_percent": metric_wape(x["actual_sales"], x["predicted_sales"]),
-                    }),
-                    include_groups=False,
-                ).reset_index()
-                fig = px.line(by_h, x="horizon_step", y="WAPE_percent", markers=True, title="Recursive backtest WAPE by forecast horizon")
-                fig.update_traces(line_color=C["blue"])
-                chart_layout(fig, 350)
-            if {"actual_sales", "predicted_sales"}.issubset(eval_df.columns):
-                sample = eval_df.sample(min(2000, len(eval_df)), random_state=42)
-                fig = px.scatter(sample, x="actual_sales", y="predicted_sales", opacity=.45, title="Actual vs predicted (sample of saved backtest rows)")
-                maxv = float(max(sample["actual_sales"].max(), sample["predicted_sales"].max()))
-                fig.add_trace(go.Scatter(x=[0, maxv], y=[0, maxv], mode="lines", name="Ideal prediction", line=dict(dash="dash")))
-                chart_layout(fig, 420)
-            st.download_button("Download recursive backtest rows", backtest.to_csv(index=False).encode(), "recursive_backtest_rows.csv", "text/csv")
-        else:
-            st.warning("Backtest file exists but does not contain the expected actual/predicted columns.")
-    else:
-        st.warning("Recursive backtesting report was not found. Add the Stage 7 prediction CSV to reports/stage7_backtesting/.")
+        st.info("No saved model-comparison report was found. The comparison above is calculated from the saved model artifacts.")
 
     if not cross_origin.empty:
-        st.markdown("### Stage 15 cross-origin comparison")
+        st.markdown("#### Stage 15 cross-origin comparison")
         st.dataframe(cross_origin, use_container_width=True, hide_index=True)
-    if readiness_summary:
+    if not horizon_backtest.empty:
+        st.markdown("#### Stage 15 performance by forecast horizon")
+        st.dataframe(horizon_backtest, use_container_width=True, hide_index=True)
+    if not readiness_summary:
+        st.caption("No final readiness JSON report was found in the configured reports folders.")
+    else:
         with st.expander("Final readiness audit summary"):
             st.json(readiness_summary)
+
 
 elif page == "Store & Product Analytics":
     show_hero("Store & Product Analytics", "Compare demand concentration, replenishment needs, and risk across retail segments.")
@@ -951,4 +1036,3 @@ st.caption(
     f"{first_history_date:%Y-%m-%d} to {last_history_date:%Y-%m-%d}. "
     "Forecasts are estimates. Inventory and what-if outputs are simulated."
 )
-
