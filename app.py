@@ -322,10 +322,10 @@ def make_features(store, family, forecast_date, history, promotion=0.0):
         "sales_rolling_std_7": float(np.std(last7, ddof=1)) if len(last7) > 1 else 0.0,
     }
 
-@st.cache_data(show_spinner="Generating recursive forecasts...")
+@st.cache_data(show_spinner="Generating forecasts (batched model prediction)...", ttl=3600, max_entries=12)
 def generate_forecast(
     data_fingerprint: str,
-    data: pd.DataFrame,
+    _data: pd.DataFrame,
     model_path: str,
     model_mtime: float,
     horizon: int,
@@ -333,17 +333,29 @@ def generate_forecast(
     families: tuple,
     promotion_mode: str,
 ):
+    """
+    Generate recursive forecasts efficiently.
+
+    The previous implementation called model.predict once for every
+    store-family pair on every forecast day. With 54 stores and 33 families,
+    that can mean 12,000+ tiny model calls for a 7-day forecast. This version
+    makes one batch prediction per forecast day while preserving recursive
+    lag updates.
+    """
     model = load_model(model_path, model_mtime)
-    sub = data[data["store_nbr"].isin(stores) & data["family"].isin(families)].copy()
-    # Preserve full daily series per selected store-family; missing historical dates become zero.
-    daily = sub.groupby(["date", "store_nbr", "family"], as_index=False, observed=True).agg(
-        sales=("sales", "sum"), onpromotion=("onpromotion", "sum")
+    sub = _data[
+        _data["store_nbr"].isin(stores) & _data["family"].isin(families)
+    ].copy()
+
+    daily = (
+        sub.groupby(["date", "store_nbr", "family"], as_index=False, observed=True)
+        .agg(sales=("sales", "sum"), onpromotion=("onpromotion", "sum"))
     )
     all_dates = pd.date_range(first_history_date, last_history_date, freq="D")
     indexed = daily.set_index(["store_nbr", "family", "date"]).sort_index()
-    rows = []
-    start = last_history_date + pd.Timedelta(days=1)
 
+    # Prepare the history and recent promotion series for each requested pair.
+    pairs = []
     for store in stores:
         for family in families:
             try:
@@ -353,32 +365,70 @@ def generate_forecast(
             except KeyError:
                 history_series = pd.Series(dtype=float)
                 promo_series = pd.Series(dtype=float)
+
             history_series.index = pd.to_datetime(history_series.index)
             history_series = history_series.groupby(level=0).sum().reindex(all_dates, fill_value=0.0)
             promo_series.index = pd.to_datetime(promo_series.index)
             promo_series = promo_series.groupby(level=0).sum().reindex(all_dates, fill_value=0.0)
-            history = {pd.Timestamp(d): float(v) for d, v in history_series.items()}
 
-            for step in range(horizon):
-                fdate = start + pd.Timedelta(days=step)
-                if promotion_mode == "Use recent average":
-                    promo = float(promo_series.tail(28).mean()) if len(promo_series) else 0.0
-                elif promotion_mode == "Zero promotion":
-                    promo = 0.0
-                else:
-                    promo = float(promo_series.tail(7).max()) if len(promo_series) else 0.0
+            pairs.append({
+                "store": int(store),
+                "family": str(family),
+                "history": {pd.Timestamp(d): float(v) for d, v in history_series.items()},
+                "promo_recent_7": float(promo_series.tail(7).max()) if len(promo_series) else 0.0,
+                "promo_recent_28": float(promo_series.tail(28).mean()) if len(promo_series) else 0.0,
+            })
 
-                feat = make_features(store, family, fdate, history, promo)
-                X = pd.DataFrame([feat], columns=FEATURES)
-                raw_pred = float(np.asarray(model.predict(X)).reshape(-1)[0])
-                pred = max(0.0, raw_pred) if np.isfinite(raw_pred) else 0.0
-                rows.append({
-                    "forecast_date": fdate, "store_nbr": int(store), "family": str(family),
-                    "forecast_demand": pred, "raw_prediction": raw_pred,
-                    "onpromotion_assumption": promo, "horizon_day": step + 1,
-                    "model": Path(model_path).stem,
-                })
-                history[fdate] = pred
+    rows = []
+    forecast_start = last_history_date + pd.Timedelta(days=1)
+
+    for step in range(int(horizon)):
+        forecast_date = forecast_start + pd.Timedelta(days=step)
+        feature_rows = []
+        for pair in pairs:
+            if promotion_mode == "Use recent average":
+                promo = pair["promo_recent_28"]
+            elif promotion_mode == "Zero promotion":
+                promo = 0.0
+            else:
+                promo = pair["promo_recent_7"]
+
+            feature_rows.append(
+                make_features(
+                    pair["store"], pair["family"], forecast_date,
+                    pair["history"], promo
+                )
+            )
+
+        if not feature_rows:
+            return pd.DataFrame()
+
+        X = pd.DataFrame(feature_rows, columns=FEATURES)
+        predictions = np.asarray(model.predict(X), dtype=float).reshape(-1)
+        if len(predictions) != len(pairs):
+            raise ValueError(
+                f"Model returned {len(predictions)} predictions for {len(pairs)} store-family pairs."
+            )
+
+        for pair, raw_pred in zip(pairs, predictions):
+            pred = max(0.0, float(raw_pred)) if np.isfinite(raw_pred) else 0.0
+            rows.append({
+                "forecast_date": forecast_date,
+                "store_nbr": pair["store"],
+                "family": pair["family"],
+                "forecast_demand": pred,
+                "raw_prediction": float(raw_pred) if np.isfinite(raw_pred) else np.nan,
+                "onpromotion_assumption": (
+                    pair["promo_recent_28"] if promotion_mode == "Use recent average"
+                    else 0.0 if promotion_mode == "Zero promotion"
+                    else pair["promo_recent_7"]
+                ),
+                "horizon_day": step + 1,
+                "model": Path(model_path).stem,
+            })
+            # Recursive update: tomorrow's lag features use today's prediction.
+            pair["history"][forecast_date] = pred
+
     result = pd.DataFrame(rows)
     if not result.empty:
         result["forecast_date"] = pd.to_datetime(result["forecast_date"])
@@ -506,12 +556,24 @@ if page == "Executive Overview":
 
     forecast_horizon = st.selectbox("Forecast horizon", [7, 14, 30, 60], index=0, format_func=lambda x: f"{x} days", key="overview_horizon")
     st.session_state.forecast_horizon = forecast_horizon
+    st.caption(
+        f"Forecast scope: {len(selected_stores)} stores × {len(selected_families)} product families. "
+        "Forecasts are generated in batches and cached for repeated dashboard navigation."
+    )
 
     actual_total = float(filtered["sales"].sum()) if not filtered.empty else 0.0
     daily_avg = float(filtered.groupby("date")["sales"].sum().mean()) if not filtered.empty else 0.0
-    fc = current_forecast(forecast_horizon)
-    fc_total = float(fc["forecast_demand"].sum()) if not fc.empty else 0.0
-    model = load_model(st.session_state.selected_model_path, Path(st.session_state.selected_model_path).stat().st_mtime)
+    try:
+        fc = current_forecast(forecast_horizon)
+        fc_total = float(fc["forecast_demand"].sum()) if not fc.empty else 0.0
+        model = load_model(
+            st.session_state.selected_model_path,
+            Path(st.session_state.selected_model_path).stat().st_mtime
+        )
+    except Exception as exc:
+        st.error("Forecast generation or model loading failed.")
+        st.exception(exc)
+        st.stop()
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Historical sales in scope", money(actual_total))
@@ -889,3 +951,4 @@ st.caption(
     f"{first_history_date:%Y-%m-%d} to {last_history_date:%Y-%m-%d}. "
     "Forecasts are estimates. Inventory and what-if outputs are simulated."
 )
+
