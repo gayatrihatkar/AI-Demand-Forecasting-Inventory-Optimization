@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 from pathlib import Path
-from datetime import date, timedelta
 import json
 import warnings
 
@@ -11,13 +8,44 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, HistGradientBoostingRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ============================================================
-# Demand Intelligence — retail demand forecasting dashboard
-# Uses real project files. Inventory recommendations are simulations.
-# ============================================================
+# ================================================================
+# CONFIGURATION
+# ================================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = BASE_DIR / "data" / "sales_clean.parquet"
+MODEL_PATH = BASE_DIR / "models" / "best_demand_model.joblib"
+REPORTS_DIR = BASE_DIR / "reports"
+STAGE7_DIR = REPORTS_DIR / "stage7_backtesting"
+STAGE15_DIR = REPORTS_DIR / "stage15_final_readiness_audit"
+
+FEATURES = [
+    "store_nbr", "family", "year", "month", "day",
+    "day_of_week", "day_of_year", "week_of_year", "is_weekend",
+    "onpromotion", "sales_lag_7", "sales_lag_14", "sales_lag_28",
+    "sales_rolling_mean_7", "sales_rolling_mean_28",
+    "sales_rolling_std_7",
+]
+
+COLORS = {
+    "teal": "#176B67",
+    "dark_teal": "#104C49",
+    "light_teal": "#DDEFEA",
+    "beige": "#F4EBDD",
+    "cream": "#FCF9F3",
+    "ink": "#263735",
+    "muted": "#667773",
+    "border": "#D8D2C5",
+    "orange": "#C77D32",
+    "red": "#B7473E",
+    "green": "#39785B",
+}
 
 st.set_page_config(
     page_title="Demand Intelligence | Retail AI",
@@ -26,1013 +54,1636 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-APP_DIR = Path(__file__).resolve().parent
-POSSIBLE_BASES = [
-    APP_DIR,
-    Path("/content/drive/MyDrive/AI_Demand_Forecasting_RELEASE"),
-    Path("/content/drive/MyDrive/AI_Demand_Forecasting_Project"),
-]
-BASE_DIR = next(
-    (p for p in POSSIBLE_BASES if (p / "data" / "sales_clean.parquet").exists()),
-    APP_DIR,
-)
-DATA_PATHS = [
-    BASE_DIR / "data" / "sales_clean.parquet",
-    BASE_DIR / "dataset" / "processed" / "sales_clean.parquet",
-    BASE_DIR / "dataset" / "processed" / "sales_clean.csv",
-    BASE_DIR / "data" / "sales_clean.csv",
-]
-MODEL_DIRS = [BASE_DIR / "models", BASE_DIR.parent / "AI_Demand_Forecasting_Project" / "models"]
-REPORT_DIRS = [BASE_DIR / "reports", BASE_DIR.parent / "AI_Demand_Forecasting_RESEARCH_V2" / "reports"]
-FORECAST_DIR = BASE_DIR / "generated" / "forecasts"
-SETTINGS_DIR = BASE_DIR / "generated" / "settings"
-EXPORT_DIR = BASE_DIR / "generated" / "reports"
-
-FEATURES = [
-    "store_nbr", "family", "year", "month", "day", "day_of_week",
-    "day_of_year", "week_of_year", "is_weekend", "onpromotion",
-    "sales_lag_7", "sales_lag_14", "sales_lag_28",
-    "sales_rolling_mean_7", "sales_rolling_mean_28", "sales_rolling_std_7",
-]
-C = {
-    "teal": "#176B67", "dark": "#104C49", "beige": "#F4EBDD",
-    "cream": "#FCF9F3", "ink": "#263735", "muted": "#667773",
-    "border": "#D8D2C5", "blue": "#0875D1", "red": "#B7473E",
-    "orange": "#C77D32", "green": "#39785B",
-}
-RISK_ORDER = ["Critical", "High", "Medium", "Low"]
-
 st.markdown(
     f"""
     <style>
-    :root {{ --primary-color: {C['teal']}; }}
-    .stApp {{ background: {C['beige']}; color: {C['ink']}; }}
-    [data-testid="stHeader"] {{ background: rgba(244,235,221,.94); }}
-    [data-testid="stSidebar"] {{
-        background: linear-gradient(180deg, {C['dark']} 0%, {C['teal']} 55%, #205E59 100%);
-        border-right: 1px solid #0c4541;
+    :root {{
+        --primary-color: {COLORS['teal']};
     }}
-    [data-testid="stSidebar"] * {{ color: #F8F5ED; }}
-    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {{
-        color: #E2F0EC;
+    .stApp {{
+        background: {COLORS['cream']};
+        color: {COLORS['ink']};
+    }}
+    [data-testid="stHeader"] {{
+        background: rgba(252,249,243,0.94);
+    }}
+    [data-testid="stSidebar"] {{
+        background: {COLORS['beige']};
+        border-right: 1px solid {COLORS['border']};
     }}
     [data-testid="stMetric"] {{
-        background: {C['cream']}; border: 1px solid {C['border']};
-        border-radius: 14px; padding: 14px 17px;
+        background: white;
+        border: 1px solid {COLORS['border']};
+        border-radius: 12px;
+        padding: 14px 16px;
     }}
-    [data-testid="stMetricLabel"] {{ color: {C['muted']}; }}
-    .brand-card {{
-        background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18);
-        border-radius: 16px; padding: 17px 15px; margin: 4px 0 14px 0;
+    [data-testid="stMetricLabel"] {{
+        color: {COLORS['muted']};
     }}
-    .brand-title {{ font-size: 1.12rem; font-weight: 750; color: white; }}
-    .brand-sub {{ font-size: .69rem; letter-spacing: .12em; color: #D7E9E4; }}
     .hero {{
-        background: linear-gradient(115deg, {C['dark']}, {C['teal']});
-        color: white; padding: 25px 29px; border-radius: 17px; margin-bottom: 18px;
+        background: linear-gradient(115deg, {COLORS['dark_teal']}, {COLORS['teal']});
+        color: white;
+        padding: 26px 30px;
+        border-radius: 16px;
+        margin: 4px 0 20px 0;
     }}
-    .hero h1 {{ color: white; margin: 0 0 6px 0; font-size: 1.9rem; }}
+    .hero h1 {{ color: white; margin: 0 0 8px 0; }}
     .hero p {{ color: #E7F3EF; margin: 0; }}
     .section-note {{
-        background: #DDEFEA; border-left: 4px solid {C['teal']};
-        border-radius: 7px; padding: 10px 13px; margin: 8px 0 16px 0;
+        background: {COLORS['light_teal']};
+        border-left: 4px solid {COLORS['teal']};
+        border-radius: 7px;
+        padding: 11px 14px;
+        margin: 8px 0 16px 0;
     }}
-    .muted {{ color: {C['muted']}; font-size: .88rem; }}
-    .stButton > button, .stDownloadButton > button {{
-        border-radius: 9px; font-weight: 600;
+    .small-muted {{ color: {COLORS['muted']}; font-size: 0.88rem; }}
+    div[data-testid="stDownloadButton"] button {{
+        border-radius: 8px;
     }}
-    h1, h2, h3 {{ color: {C['dark']}; }}
+    h1, h2, h3 {{ color: {COLORS['dark_teal']}; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ---------- Paths / data loading ----------
+# ================================================================
+# DATA AND MODEL LOADING
+# ================================================================
 
-def find_data_path():
-    for p in DATA_PATHS:
-        if p.exists():
-            return p
-    return None
+@st.cache_data(show_spinner=False)
+def load_sales(path_string, modified_time):
+    path = Path(path_string)
+    if not path.exists():
+        raise FileNotFoundError(f"Historical dataset not found: {path}")
 
-def find_report(name: str):
-    for root in REPORT_DIRS:
-        candidate = root / name
-        if candidate.exists():
-            return candidate
-        # Search one level down for commonly nested research reports.
-        if root.exists():
-            matches = list(root.glob(f"**/{name}"))
-            if matches:
-                return matches[0]
-    return None
-
-def find_model_files():
-    """Discover saved model pipelines in the repository root and model folders."""
-    found = {}
-    roots = [APP_DIR, *MODEL_DIRS]
-    seen_paths = set()
-    for root in roots:
-        if not root.exists():
-            continue
-        for p in root.rglob("*.joblib"):
-            try:
-                resolved = str(p.resolve())
-            except Exception:
-                resolved = str(p)
-            if resolved in seen_paths:
-                continue
-            seen_paths.add(resolved)
-            key = p.stem.lower()
-            # Keep a single entry per model filename; prefer the explicit models/ copy,
-            # then the best_demand_model artifact if duplicates are present.
-            current = found.get(key)
-            prefer_new = (
-                current is None
-                or (p.parent.name.lower() == "models" and current.parent.name.lower() != "models")
-                or ("best" in p.stem.lower() and "best" not in current.stem.lower())
-            )
-            if prefer_new:
-                found[key] = p
-    return found
-
-@st.cache_data(show_spinner="Loading and validating historical sales...")
-def load_sales(path_str: str, mtime: float):
-    path = Path(path_str)
-    df = pd.read_parquet(path) if path.suffix.lower() == ".parquet" else pd.read_csv(path)
-    needed = {"date", "store_nbr", "family", "sales"}
-    missing = needed - set(df.columns)
+    df = pd.read_parquet(path)
+    required = {"date", "store_nbr", "family", "sales"}
+    missing = required.difference(df.columns)
     if missing:
-        raise ValueError(f"Dataset is missing required columns: {sorted(missing)}")
+        raise ValueError(
+            "Dataset is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
+
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["store_nbr"] = pd.to_numeric(df["store_nbr"], errors="coerce")
+    df["store_nbr"] = pd.to_numeric(
+        df["store_nbr"], errors="coerce"
+    )
     df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
     df["family"] = df["family"].astype("string").str.strip()
-    if "onpromotion" not in df:
-        df["onpromotion"] = 0
-    df["onpromotion"] = pd.to_numeric(df["onpromotion"], errors="coerce").fillna(0)
+
+    if "onpromotion" not in df.columns:
+        df["onpromotion"] = 0.0
+
+    df["onpromotion"] = pd.to_numeric(
+        df["onpromotion"], errors="coerce"
+    ).fillna(0.0)
+
     df = df.dropna(subset=["date", "store_nbr", "family", "sales"])
     df["store_nbr"] = df["store_nbr"].astype(int)
     df["family"] = df["family"].astype(str)
     df["sales"] = df["sales"].clip(lower=0)
+
+    # Aggregate defensively if duplicate date/store/family rows exist.
     df = (
-        df.groupby(["date", "store_nbr", "family"], as_index=False, observed=True)
-        .agg(sales=("sales", "sum"), onpromotion=("onpromotion", "sum"))
+        df.groupby(
+            ["date", "store_nbr", "family"], as_index=False,
+            observed=True
+        )
+        .agg(
+            sales=("sales", "sum"),
+            onpromotion=("onpromotion", "sum"),
+        )
         .sort_values(["date", "store_nbr", "family"])
         .reset_index(drop=True)
     )
     return df
 
-@st.cache_resource(show_spinner="Loading trained model pipeline...")
-def load_model(path_str: str, mtime: float):
-    model = joblib.load(path_str)
+
+@st.cache_resource(show_spinner="Loading trained demand model...")
+def load_model(path_string, modified_time):
+    path = Path(path_string)
+    if not path.exists():
+        raise FileNotFoundError(f"Model file not found: {path}")
+
+    model = joblib.load(path)
     if not hasattr(model, "predict"):
-        raise TypeError("Saved model does not provide predict().")
+        raise TypeError("The saved model does not expose predict().")
+
+    if hasattr(model, "n_features_in_"):
+        if int(model.n_features_in_) != len(FEATURES):
+            raise ValueError(
+                "Model input feature count does not match the expected "
+                f"{len(FEATURES)} features."
+            )
     return model
 
-def read_csv_report(filename):
-    p = find_report(filename)
-    if p is None:
+
+def read_csv_if_exists(path):
+    if not path.exists():
         return pd.DataFrame()
     try:
-        return pd.read_csv(p)
+        return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
 
-def read_json_report(filename):
-    p = find_report(filename)
-    if p is None:
+
+def read_json_if_exists(path):
+    if not path.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        with open(path, "r", encoding="utf-8") as file:
+            return json.load(file)
     except Exception:
         return {}
 
-DATA_PATH = find_data_path()
-MODEL_FILES = find_model_files()
-if DATA_PATH is None:
-    st.error("Historical sales data was not found. Expected sales_clean.parquet or sales_clean.csv in the app data folder.")
-    st.info("For deployment, place the cleaned dataset at data/sales_clean.parquet relative to app.py.")
-    st.stop()
 
-sales_all = load_sales(str(DATA_PATH), DATA_PATH.stat().st_mtime)
-if sales_all.empty:
-    st.error("The historical sales dataset contains no usable rows.")
-    st.stop()
+def safe_float(value, default=0.0):
+    try:
+        value = float(value)
+        return value if np.isfinite(value) else default
+    except (TypeError, ValueError):
+        return default
 
-last_history_date = pd.Timestamp(sales_all["date"].max()).normalize()
-first_history_date = pd.Timestamp(sales_all["date"].min()).normalize()
-stores_all = sorted(sales_all["store_nbr"].unique().tolist())
-families_all = sorted(sales_all["family"].unique().tolist())
 
-# Model selection only lists files that actually exist. No fake alternatives.
-if not MODEL_FILES:
-    st.error("No trained .joblib model was found. Add the verified model to a models/ folder.")
-    st.stop()
+def fmt_number(value, decimals=0):
+    if pd.isna(value):
+        return "—"
+    return f"{value:,.{decimals}f}"
 
-def model_label(key, path):
-    k = key.lower()
-    if "xgboost" in k or k == "best_demand_model":
-        return f"XGBoost — {path.name}"
-    if "random_forest" in k:
-        return f"Random Forest — {path.name}"
-    if "lightgbm" in k:
-        return f"LightGBM — {path.name}"
-    if "catboost" in k:
-        return f"CatBoost — {path.name}"
-    if "extra_trees" in k:
-        return f"Extra Trees — {path.name}"
-    return path.stem.replace("_", " ").title()
 
-model_options = {model_label(k, p): p for k, p in sorted(MODEL_FILES.items())}
-preferred_label = next((label for label, path in model_options.items() if "best_demand_model" in path.name.lower()), None)
-if preferred_label is None:
-    preferred_label = next((label for label, path in model_options.items() if "xgboost" in path.name.lower()), next(iter(model_options)))
+def apply_filters(df, filters):
+    out = df.copy()
+    if out.empty:
+        return out
+    if filters.get("stores"):
+        out = out[out["store_nbr"].isin(filters["stores"])]
+    if filters.get("families"):
+        out = out[out["family"].isin(filters["families"])]
+    if filters.get("start") is not None:
+        out = out[out["date"] >= pd.Timestamp(filters["start"])]
+    if filters.get("end") is not None:
+        out = out[out["date"] <= pd.Timestamp(filters["end"])]
+    return out
 
-# Sidebar brand and navigation
-with st.sidebar:
-    st.markdown(
-        """
-        <div class="brand-card">
-          <div style="font-size:1.55rem">◈ &nbsp;<span class="brand-title">Demand Intelligence</span></div>
-          <div class="brand-sub">RETAIL AI · FORECASTING</div>
-          <hr style="border-color:#7AA7A0">
-          <div style="font-size:.83rem">Demand planning, inventory signals and decision support in one place.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+
+def add_csv_download(df, filename, label="Download CSV"):
+    st.download_button(
+        label=label,
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name=filename,
+        mime="text/csv",
+        use_container_width=False,
     )
-    if st.button("↻ Refresh data", use_container_width=True):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.rerun()
-    st.markdown("### WORKSPACE")
-    pages = [
-        "Executive Overview", "Demand Forecasting", "Inventory Optimizer",
-        "Smart Alerts", "Sales Explorer", "What-if Simulator",
-        "Model Evaluation", "Store & Product Analytics",
-        "Business Intelligence", "Data Quality & Explorer",
+
+
+def metric_card(label, value, help_text=None):
+    st.metric(label, value, help=help_text)
+
+
+def section_header(title, subtitle=None):
+    st.subheader(title)
+    if subtitle:
+        st.caption(subtitle)
+
+
+def make_chart_theme(fig, height=380):
+    fig.update_layout(
+        height=height,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["ink"]),
+        margin=dict(l=12, r=12, t=35, b=12),
+        legend_title_text="",
+        hovermode="x unified",
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(gridcolor="#E5E0D6", zeroline=False)
+    return fig
+
+
+def daily_history(df):
+    return (
+        df.groupby("date", as_index=False)
+        .agg(sales=("sales", "sum"))
+        .sort_values("date")
+    )
+
+
+# ================================================================
+# RECURSIVE FORECASTING USING THE ORIGINAL 16-FEATURE PIPELINE
+# ================================================================
+
+def date_features(date_value):
+    iso_week = int(pd.Timestamp(date_value).isocalendar().week)
+    return {
+        "year": int(date_value.year),
+        "month": int(date_value.month),
+        "day": int(date_value.day),
+        "day_of_week": int(date_value.dayofweek),
+        "day_of_year": int(date_value.dayofyear),
+        "week_of_year": iso_week,
+        "is_weekend": int(date_value.dayofweek >= 5),
+    }
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def generate_recursive_forecast(
+    horizon, sales_path, sales_mtime, model_path, model_mtime
+):
+    """
+    Recursive forecasts begin on the day after the last date in the
+    historical dataset. Future promotions are assumed to be zero.
+
+    Missing historical dates are filled with zero sales for each
+    store-family series. Predictions are clipped at zero.
+    """
+    history_df = load_sales(sales_path, sales_mtime)
+    model = load_model(model_path, model_mtime)
+
+    last_date = pd.Timestamp(history_df["date"].max()).normalize()
+    first_date = pd.Timestamp(history_df["date"].min()).normalize()
+
+    stores = sorted(history_df["store_nbr"].dropna().unique().astype(int))
+    families = sorted(history_df["family"].dropna().unique().tolist())
+
+    if not stores or not families:
+        raise ValueError("No stores or product families are available.")
+
+    all_dates = pd.date_range(first_date, last_date, freq="D")
+    keys = [
+        (int(store), str(family))
+        for store in stores
+        for family in families
     ]
+
+    # A complete daily series per store/family makes lag offsets explicit.
+    series_map = {}
+    indexed = history_df.set_index(
+        ["store_nbr", "family", "date"]
+    )["sales"]
+
+    for store, family in keys:
+        try:
+            values = indexed.loc[(store, family)]
+            values = values.reindex(all_dates, fill_value=0.0)
+            series_map[(store, family)] = (
+                pd.to_numeric(values, errors="coerce")
+                .fillna(0.0)
+                .clip(lower=0)
+                .astype(float)
+                .tolist()
+            )
+        except KeyError:
+            series_map[(store, family)] = [0.0] * len(all_dates)
+
+    output = []
+    future_dates = pd.date_range(
+        last_date + pd.Timedelta(days=1),
+        periods=int(horizon),
+        freq="D",
+    )
+
+    for step, forecast_date in enumerate(future_dates, start=1):
+        calendar = date_features(forecast_date)
+        feature_rows = []
+
+        for store, family in keys:
+            values = series_map[(store, family)]
+            if len(values) < 28:
+                padded = [0.0] * (28 - len(values)) + values
+            else:
+                padded = values
+
+            last7 = np.asarray(padded[-7:], dtype=float)
+            last28 = np.asarray(padded[-28:], dtype=float)
+
+            row = {
+                "store_nbr": int(store),
+                "family": str(family),
+                **calendar,
+                "onpromotion": 0.0,
+                "sales_lag_7": float(padded[-7]),
+                "sales_lag_14": float(padded[-14]),
+                "sales_lag_28": float(padded[-28]),
+                "sales_rolling_mean_7": float(np.mean(last7)),
+                "sales_rolling_mean_28": float(np.mean(last28)),
+                "sales_rolling_std_7": (
+                    float(np.std(last7, ddof=1))
+                    if len(last7) > 1 else 0.0
+                ),
+            }
+            feature_rows.append(row)
+
+        feature_df = pd.DataFrame(feature_rows, columns=FEATURES)
+        predictions = np.asarray(model.predict(feature_df), dtype=float)
+        predictions = np.nan_to_num(
+            predictions, nan=0.0, posinf=0.0, neginf=0.0
+        )
+        predictions = np.clip(predictions, 0, None)
+
+        for (store, family), prediction in zip(keys, predictions):
+            series_map[(store, family)].append(float(prediction))
+            output.append({
+                "date": forecast_date,
+                "horizon_step": step,
+                "store_nbr": store,
+                "family": family,
+                "predicted_sales": float(prediction),
+                "forecast_assumption": "Future onpromotion = 0",
+            })
+
+    forecast_df = pd.DataFrame(output)
+    return forecast_df, last_date
+
+
+
+# ================================================================
+# ON-DEMAND SIX-METHOD MODEL EVALUATION
+# ================================================================
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def build_evaluation_frame(_sales_df, cutoff_days=28):
+    """Build chronological lag features from observed sales; no future leakage."""
+    d = _sales_df[["date", "store_nbr", "family", "sales", "onpromotion"]].copy()
+    d["date"] = pd.to_datetime(d["date"])
+    d = d.sort_values(["store_nbr", "family", "date"]).reset_index(drop=True)
+    grp = d.groupby(["store_nbr", "family"], sort=False)["sales"]
+    for lag in (7, 14, 28):
+        d[f"sales_lag_{lag}"] = grp.shift(lag)
+    shifted = d.groupby(["store_nbr", "family"], sort=False)["sales"].shift(1)
+    d["sales_rolling_mean_7"] = shifted.groupby(
+        [d["store_nbr"], d["family"]], sort=False
+    ).rolling(7, min_periods=7).mean().reset_index(level=[0, 1], drop=True)
+    d["sales_rolling_mean_28"] = shifted.groupby(
+        [d["store_nbr"], d["family"]], sort=False
+    ).rolling(28, min_periods=28).mean().reset_index(level=[0, 1], drop=True)
+    d["sales_rolling_std_7"] = shifted.groupby(
+        [d["store_nbr"], d["family"]], sort=False
+    ).rolling(7, min_periods=7).std().reset_index(level=[0, 1], drop=True)
+    d["year"] = d["date"].dt.year
+    d["month"] = d["date"].dt.month
+    d["day"] = d["date"].dt.day
+    d["day_of_week"] = d["date"].dt.dayofweek
+    d["day_of_year"] = d["date"].dt.dayofyear
+    d["week_of_year"] = d["date"].dt.isocalendar().week.astype(int)
+    d["is_weekend"] = (d["day_of_week"] >= 5).astype(int)
+    d["onpromotion"] = pd.to_numeric(d["onpromotion"], errors="coerce").fillna(0)
+    d = d.dropna(subset=FEATURES).copy()
+    cutoff = d["date"].max() - pd.Timedelta(days=int(cutoff_days))
+    train = d[d["date"] <= cutoff].copy()
+    test = d[d["date"] > cutoff].copy()
+    # Cap training rows for Streamlit Cloud resource limits; preserve chronological coverage.
+    if len(train) > 60000:
+        train = train.sample(n=60000, random_state=42).sort_values("date")
+    return train, test
+
+
+@st.cache_data(show_spinner=False, max_entries=1)
+def run_six_method_evaluation(_sales_df, _saved_model, cutoff_days=28):
+    """Compare the deployed XGBoost pipeline with five baseline/ML methods on one holdout."""
+    from sklearn.base import clone
+    train, test = build_evaluation_frame(_sales_df, cutoff_days)
+    if train.empty or test.empty:
+        raise ValueError("Not enough lagged history to build train and holdout sets.")
+
+    numeric_features = [c for c in FEATURES if c != "family"]
+    # One-hot encode product family for the sklearn estimators.
+    x_train = pd.get_dummies(train[FEATURES], columns=["family"], dtype=float)
+    x_test = pd.get_dummies(test[FEATURES], columns=["family"], dtype=float)
+    x_test = x_test.reindex(columns=x_train.columns, fill_value=0)
+    y_train = train["sales"].to_numpy(dtype=float)
+    y_test = test["sales"].to_numpy(dtype=float)
+
+    rows = []
+    predictions_by_model = {}
+
+    def add_metrics(name, pred, note):
+        pred = np.nan_to_num(np.asarray(pred, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        pred = np.clip(pred, 0, None)
+        mae = float(mean_absolute_error(y_test, pred))
+        rmse = float(np.sqrt(mean_squared_error(y_test, pred)))
+        denominator = float(np.abs(y_test).sum())
+        wape = float(100 * np.abs(y_test - pred).sum() / denominator) if denominator else np.nan
+        bias = float((pred - y_test).mean())
+        rows.append({"Model": name, "MAE": mae, "RMSE": rmse, "WAPE_percent": wape,
+                     "Mean_Bias": bias, "Holdout_Days": int(cutoff_days),
+                     "Training_Rows": len(train), "Test_Rows": len(test), "Method": note})
+        predictions_by_model[name] = pred
+
+    # Existing saved pipeline: evaluated directly with the original feature schema.
+    try:
+        add_metrics("XGBoost (saved model)", _saved_model.predict(test[FEATURES]),
+                    "Existing saved model; chronological holdout, observed lag features")
+    except Exception as exc:
+        rows.append({"Model": "XGBoost (saved model)", "MAE": np.nan, "RMSE": np.nan,
+                     "WAPE_percent": np.nan, "Mean_Bias": np.nan,
+                     "Holdout_Days": int(cutoff_days), "Training_Rows": len(train),
+                     "Test_Rows": len(test), "Method": f"Saved model prediction failed: {exc}"})
+
+    models = [
+        ("Random Forest", RandomForestRegressor(n_estimators=60, min_samples_leaf=2,
+                                                max_features=0.8, n_jobs=-1, random_state=42)),
+        ("Extra Trees", ExtraTreesRegressor(n_estimators=60, min_samples_leaf=2,
+                                            max_features=0.8, n_jobs=-1, random_state=42)),
+        ("HistGradientBoosting", HistGradientBoostingRegressor(max_iter=100, max_leaf_nodes=20,
+                                                               learning_rate=0.08, random_state=42)),
+        ("Decision Tree", DecisionTreeRegressor(max_depth=18, min_samples_leaf=5, random_state=42)),
+    ]
+    for name, estimator in models:
+        try:
+            estimator.fit(x_train, y_train)
+            add_metrics(name, estimator.predict(x_test),
+                        "Trained at evaluation time on capped historical training sample")
+        except Exception as exc:
+            rows.append({"Model": name, "MAE": np.nan, "RMSE": np.nan,
+                         "WAPE_percent": np.nan, "Mean_Bias": np.nan,
+                         "Holdout_Days": int(cutoff_days), "Training_Rows": len(train),
+                         "Test_Rows": len(test), "Method": f"Evaluation failed: {exc}"})
+
+    # Seasonal naive is a transparent baseline: use observed sales from 7 days earlier.
+    try:
+        add_metrics("Seasonal Naive (lag 7)", test["sales_lag_7"].to_numpy(),
+                    "Baseline; predicts the value from seven days earlier")
+    except Exception as exc:
+        rows.append({"Model": "Seasonal Naive (lag 7)", "MAE": np.nan, "RMSE": np.nan,
+                     "WAPE_percent": np.nan, "Mean_Bias": np.nan,
+                     "Holdout_Days": int(cutoff_days), "Training_Rows": len(train),
+                     "Test_Rows": len(test), "Method": f"Evaluation failed: {exc}"})
+    return pd.DataFrame(rows), predictions_by_model, train, test
+
+
+# ================================================================
+# INITIALIZE APP
+# ================================================================
+
+st.markdown(
+    """
+    <div class="hero">
+      <h1>Demand Intelligence</h1>
+      <p>AI-powered demand forecasting and inventory planning for
+      supermarket retail</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if not DATA_PATH.exists() or not MODEL_PATH.exists():
+    st.error(
+        "Required release artifacts are missing. Check that the "
+        "data/ and models/ folders are present beside app.py."
+    )
+    st.stop()
+
+try:
+    sales = load_sales(
+        str(DATA_PATH), DATA_PATH.stat().st_mtime
+    )
+    model = load_model(
+        str(MODEL_PATH), MODEL_PATH.stat().st_mtime
+    )
+except Exception as exc:
+    st.error(f"Could not initialize the project: {exc}")
+    st.stop()
+
+model_comparison = read_csv_if_exists(
+    REPORTS_DIR / "model_comparison.csv"
+)
+backtest = read_csv_if_exists(
+    STAGE7_DIR / "stage7_recursive_predictions.csv"
+)
+stage15_overall = read_csv_if_exists(
+    STAGE15_DIR / "stage15_cross_origin_overall_comparison.csv"
+)
+stage15_horizon = read_csv_if_exists(
+    STAGE15_DIR / "stage15_cross_origin_by_horizon.csv"
+)
+stage15_store = read_csv_if_exists(
+    STAGE15_DIR / "stage15_cross_origin_store_comparison.csv"
+)
+stage15_family = read_csv_if_exists(
+    STAGE15_DIR / "stage15_cross_origin_family_comparison.csv"
+)
+stage15_summary = read_json_if_exists(
+    STAGE15_DIR / "stage15_final_readiness_summary.json"
+)
+
+last_history_date = pd.Timestamp(sales["date"].max()).normalize()
+first_history_date = pd.Timestamp(sales["date"].min()).normalize()
+stores_all = sorted(sales["store_nbr"].unique().astype(int).tolist())
+families_all = sorted(sales["family"].unique().tolist())
+
+# Shared filter state: configured in Executive Overview, then used elsewhere.
+if "global_filters" not in st.session_state:
+    st.session_state["global_filters"] = {
+        "stores": stores_all,
+        "families": families_all,
+        "start": first_history_date.date(),
+        "end": last_history_date.date(),
+    }
+
+# ================================================================
+# NAVIGATION
+# ================================================================
+
+pages = [
+    "Executive Overview",
+    "Demand Forecasting",
+    "Inventory Optimization",
+    "Smart Alerts",
+    "Sales Explorer",
+    "What-if Simulator",
+    "Model Evaluation",
+    "Store & Product Analytics",
+    "Business Intelligence",
+    "Data Quality & Explorer",
+]
+
+with st.sidebar:
+    st.markdown("## 📦 Demand Intelligence")
+    st.caption("Retail forecasting and planning")
     page = st.radio("Navigate", pages, label_visibility="collapsed")
-    st.markdown("---")
+    st.divider()
     st.caption("PROJECT STATUS")
-    st.write("**Model:** Verified saved pipeline")
+    st.write("**Model:** Original XGBoost pipeline")
     st.write(f"**Stores:** {len(stores_all)}")
     st.write(f"**Product families:** {len(families_all)}")
     st.write(f"**Historical end:** {last_history_date:%d %b %Y}")
-    st.caption("Research prototype · Inventory outputs are simulated")
+    st.caption("Research prototype · Not a live inventory feed")
 
-# Global filter values live in the Executive Overview, as requested.
-# Persist them in session state for other pages.
-if "global_stores" not in st.session_state:
-    st.session_state.global_stores = stores_all
-if "global_families" not in st.session_state:
-    st.session_state.global_families = families_all
-if "global_start" not in st.session_state:
-    st.session_state.global_start = first_history_date.date()
-if "global_end" not in st.session_state:
-    st.session_state.global_end = last_history_date.date()
+filters = st.session_state["global_filters"]
+filtered_sales = apply_filters(sales, filters)
 
-selected_stores = [s for s in st.session_state.global_stores if s in stores_all]
-selected_families = [f for f in st.session_state.global_families if f in families_all]
-if not selected_stores:
-    selected_stores = stores_all
-if not selected_families:
-    selected_families = families_all
+# ================================================================
+# EXECUTIVE OVERVIEW
+# ================================================================
 
-start_date = pd.Timestamp(st.session_state.global_start)
-end_date = pd.Timestamp(st.session_state.global_end)
-if start_date > end_date:
-    start_date, end_date = first_history_date, last_history_date
-
-filtered = sales_all[
-    sales_all["store_nbr"].isin(selected_stores)
-    & sales_all["family"].isin(selected_families)
-    & sales_all["date"].between(start_date, end_date)
-].copy()
-
-# ---------- Forecasting engine ----------
-
-def make_features(store, family, forecast_date, history, promotion=0.0):
-    def lag(n):
-        d = forecast_date - pd.Timedelta(days=n)
-        return float(history.get(d, 0.0))
-    last7 = [float(history.get(forecast_date - pd.Timedelta(days=i), 0.0)) for i in range(1, 8)]
-    last28 = [float(history.get(forecast_date - pd.Timedelta(days=i), 0.0)) for i in range(1, 29)]
-    dow = int(forecast_date.dayofweek)
-    return {
-        "store_nbr": int(store),
-        "family": str(family),
-        "year": int(forecast_date.year),
-        "month": int(forecast_date.month),
-        "day": int(forecast_date.day),
-        "day_of_week": dow,
-        "day_of_year": int(forecast_date.dayofyear),
-        "week_of_year": int(forecast_date.isocalendar().week),
-        "is_weekend": int(dow >= 5),
-        "onpromotion": float(promotion),
-        "sales_lag_7": lag(7),
-        "sales_lag_14": lag(14),
-        "sales_lag_28": lag(28),
-        "sales_rolling_mean_7": float(np.mean(last7)),
-        "sales_rolling_mean_28": float(np.mean(last28)),
-        "sales_rolling_std_7": float(np.std(last7, ddof=1)) if len(last7) > 1 else 0.0,
-    }
-
-@st.cache_data(show_spinner="Generating recursive forecasts...")
-def generate_forecast(
-    data_fingerprint: str,
-    data: pd.DataFrame,
-    model_path: str,
-    model_mtime: float,
-    horizon: int,
-    stores: tuple,
-    families: tuple,
-    promotion_mode: str,
-):
-    model = load_model(model_path, model_mtime)
-    sub = data[data["store_nbr"].isin(stores) & data["family"].isin(families)].copy()
-    # Preserve full daily series per selected store-family; missing historical dates become zero.
-    daily = sub.groupby(["date", "store_nbr", "family"], as_index=False, observed=True).agg(
-        sales=("sales", "sum"), onpromotion=("onpromotion", "sum")
-    )
-    all_dates = pd.date_range(first_history_date, last_history_date, freq="D")
-    indexed = daily.set_index(["store_nbr", "family", "date"]).sort_index()
-    rows = []
-    start = last_history_date + pd.Timedelta(days=1)
-
-    for store in stores:
-        for family in families:
-            try:
-                hist = indexed.loc[(int(store), str(family))]
-                history_series = hist["sales"]
-                promo_series = hist["onpromotion"]
-            except KeyError:
-                history_series = pd.Series(dtype=float)
-                promo_series = pd.Series(dtype=float)
-            history_series.index = pd.to_datetime(history_series.index)
-            history_series = history_series.groupby(level=0).sum().reindex(all_dates, fill_value=0.0)
-            promo_series.index = pd.to_datetime(promo_series.index)
-            promo_series = promo_series.groupby(level=0).sum().reindex(all_dates, fill_value=0.0)
-            history = {pd.Timestamp(d): float(v) for d, v in history_series.items()}
-
-            for step in range(horizon):
-                fdate = start + pd.Timedelta(days=step)
-                if promotion_mode == "Use recent average":
-                    promo = float(promo_series.tail(28).mean()) if len(promo_series) else 0.0
-                elif promotion_mode == "Zero promotion":
-                    promo = 0.0
-                else:
-                    promo = float(promo_series.tail(7).max()) if len(promo_series) else 0.0
-
-                feat = make_features(store, family, fdate, history, promo)
-                X = pd.DataFrame([feat], columns=FEATURES)
-                raw_pred = float(np.asarray(model.predict(X)).reshape(-1)[0])
-                pred = max(0.0, raw_pred) if np.isfinite(raw_pred) else 0.0
-                rows.append({
-                    "forecast_date": fdate, "store_nbr": int(store), "family": str(family),
-                    "forecast_demand": pred, "raw_prediction": raw_pred,
-                    "onpromotion_assumption": promo, "horizon_day": step + 1,
-                    "model": Path(model_path).stem,
-                })
-                history[fdate] = pred
-    result = pd.DataFrame(rows)
-    if not result.empty:
-        result["forecast_date"] = pd.to_datetime(result["forecast_date"])
-    return result
-
-def current_forecast(horizon=None, stores=None, families=None, promotion_mode="Use recent average"):
-    horizon = int(horizon or st.session_state.get("forecast_horizon", 7))
-    stores = tuple(stores or selected_stores)
-    families = tuple(families or selected_families)
-    model_path = st.session_state.get("selected_model_path", str(model_options[preferred_label]))
-    mtime = Path(model_path).stat().st_mtime
-    fingerprint = f"{DATA_PATH}:{DATA_PATH.stat().st_mtime}:{len(sales_all)}"
-    return generate_forecast(
-        fingerprint, sales_all, model_path, mtime, horizon, stores, families, promotion_mode
+if page == "Executive Overview":
+    section_header(
+        "Executive Overview",
+        "Configure the shared filters here. Applied filters are reused "
+        "across the dashboard."
     )
 
-def metric_wape(actual, predicted):
-    denom = float(np.abs(np.asarray(actual, dtype=float)).sum())
-    return float(np.abs(np.asarray(actual, dtype=float) - np.asarray(predicted, dtype=float)).sum() / denom * 100) if denom else np.nan
-
-def metrics_from_backtest(df):
-    if df.empty or not {"actual_sales", "predicted_sales"}.issubset(df.columns):
-        return None
-    a = pd.to_numeric(df["actual_sales"], errors="coerce").to_numpy()
-    p = pd.to_numeric(df["predicted_sales"], errors="coerce").to_numpy()
-    ok = np.isfinite(a) & np.isfinite(p)
-    a, p = a[ok], p[ok]
-    if not len(a):
-        return None
-    return {
-        "MAE": float(np.mean(np.abs(a-p))),
-        "RMSE": float(np.sqrt(np.mean((a-p)**2))),
-        "WAPE": metric_wape(a, p),
-        "Bias (predicted − actual)": float(np.mean(p-a)),
-        "Rows": int(len(a)),
-    }
-
-@st.cache_data(show_spinner="Evaluating saved models on a chronological holdout...", ttl=3600, max_entries=4)
-def evaluate_saved_models(
-    data_fingerprint: str,
-    _data: pd.DataFrame,
-    model_specs: tuple,
-    validation_days: int = 28,
-):
-    """
-    Compare saved model artifacts on the same final chronological holdout.
-    Uses actual historical lag values for one-step-ahead evaluation; this is
-    explicitly not a recursive multi-day forecast benchmark.
-    """
-    data = _data[["date", "store_nbr", "family", "sales", "onpromotion"]].copy()
-    data["date"] = pd.to_datetime(data["date"]).dt.normalize()
-    data = data.sort_values(["store_nbr", "family", "date"])
-    end_date = data["date"].max()
-    validation_start = end_date - pd.Timedelta(days=validation_days - 1)
-    validation = data[data["date"].between(validation_start, end_date)].copy()
-    if validation.empty:
-        return pd.DataFrame(), f"No rows found in the last {validation_days} days."
-
-    # Per-series actual history dictionary. Each prediction only reads dates
-    # strictly earlier than its target date, so target sales cannot leak into lags.
-    history_by_pair = {}
-    for (store, family), grp in data.groupby(["store_nbr", "family"], sort=False, observed=True):
-        history_by_pair[(int(store), str(family))] = {
-            pd.Timestamp(d): float(v) for d, v in zip(grp["date"], grp["sales"])
-        }
-
-    feature_rows = []
-    for row in validation.itertuples(index=False):
-        pair_history = history_by_pair.get((int(row.store_nbr), str(row.family)), {})
-        feature_rows.append(
-            make_features(
-                int(row.store_nbr),
-                str(row.family),
-                pd.Timestamp(row.date),
-                pair_history,
-                float(row.onpromotion),
-            )
+    with st.form("global_filter_form"):
+        c1, c2 = st.columns(2)
+        selected_stores = c1.multiselect(
+            "Stores",
+            options=stores_all,
+            default=filters["stores"],
+            help="Select one or more stores.",
         )
-    X = pd.DataFrame(feature_rows, columns=FEATURES)
-    y = pd.to_numeric(validation["sales"], errors="coerce").to_numpy(dtype=float)
-    valid = np.isfinite(y)
-    X = X.loc[valid].reset_index(drop=True)
-    y = y[valid]
-    if len(y) == 0:
-        return pd.DataFrame(), "No valid target sales were available for evaluation."
+        selected_families = c2.multiselect(
+            "Product families",
+            options=families_all,
+            default=filters["families"],
+        )
 
-    result_rows = []
-    errors = []
-    for label, path_str, mtime in model_specs:
-        try:
-            model = load_model(path_str, float(mtime))
-            pred = np.asarray(model.predict(X), dtype=float).reshape(-1)
-            if len(pred) != len(y):
-                raise ValueError(f"Expected {len(y)} predictions but got {len(pred)}.")
-            pred = np.where(np.isfinite(pred), np.maximum(pred, 0.0), 0.0)
-            abs_err = np.abs(y - pred)
-            denom = float(np.abs(y).sum())
-            result_rows.append({
-                "Model": label,
-                "MAE": float(abs_err.mean()),
-                "RMSE": float(np.sqrt(np.mean((y - pred) ** 2))),
-                "WAPE (%)": float(abs_err.sum() / denom * 100) if denom else np.nan,
-                "Bias (predicted − actual)": float(np.mean(pred - y)),
-                "Evaluation rows": int(len(y)),
-                "Validation start": validation_start.date().isoformat(),
-                "Validation end": end_date.date().isoformat(),
-                "Evaluation protocol": "One-step-ahead; actual prior sales used for lags",
-                "Status": "OK",
-            })
-        except Exception as exc:
-            errors.append(f"{label}: {type(exc).__name__}: {exc}")
-            result_rows.append({
-                "Model": label, "MAE": np.nan, "RMSE": np.nan, "WAPE (%)": np.nan,
-                "Bias (predicted − actual)": np.nan, "Evaluation rows": int(len(y)),
-                "Validation start": validation_start.date().isoformat(),
-                "Validation end": end_date.date().isoformat(),
-                "Evaluation protocol": "One-step-ahead; actual prior sales used for lags",
-                "Status": f"Could not evaluate: {type(exc).__name__}",
-            })
-    results = pd.DataFrame(result_rows)
-    if not results.empty and "WAPE (%)" in results:
-        results = results.sort_values("WAPE (%)", ascending=True, na_position="last").reset_index(drop=True)
-    return results, "\\n".join(errors)
+        c3, c4 = st.columns(2)
+        start_date = c3.date_input(
+            "Historical start date",
+            value=max(
+                first_history_date.date(),
+                filters["start"]
+            ),
+            min_value=first_history_date.date(),
+            max_value=last_history_date.date(),
+        )
+        end_date = c4.date_input(
+            "Historical end date",
+            value=min(
+                last_history_date.date(),
+                filters["end"]
+            ),
+            min_value=first_history_date.date(),
+            max_value=last_history_date.date(),
+        )
 
+        apply_button = st.form_submit_button(
+            "Apply dashboard filters",
+            type="primary",
+        )
 
-def save_csv(df: pd.DataFrame, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
-    return path
+    if apply_button:
+        if start_date > end_date:
+            st.error("The start date must be on or before the end date.")
+        elif not selected_stores or not selected_families:
+            st.error("Select at least one store and one product family.")
+        else:
+            st.session_state["global_filters"] = {
+                "stores": selected_stores,
+                "families": selected_families,
+                "start": start_date,
+                "end": end_date,
+            }
+            st.rerun()
 
-def save_json(obj, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
-    return path
+    filters = st.session_state["global_filters"]
+    filtered_sales = apply_filters(sales, filters)
 
-def money(v):
-    return f"{float(v):,.0f}"
-
-def show_hero(title, subtitle):
     st.markdown(
-        f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>',
+        f'<div class="section-note">Showing '
+        f'{len(filters["stores"]):,} selected stores and '
+        f'{len(filters["families"]):,} selected product families '
+        f'from {filters["start"]} to {filters["end"]}. '
+        f'Historical data ends on {last_history_date:%Y-%m-%d}.</div>',
         unsafe_allow_html=True,
     )
 
-def show_note(text):
-    st.markdown(f'<div class="section-note">{text}</div>', unsafe_allow_html=True)
-
-def chart_layout(fig, height=390):
-    fig.update_layout(
-        height=height, paper_bgcolor=C["beige"], plot_bgcolor=C["beige"],
-        font=dict(color=C["ink"]), margin=dict(l=18, r=18, t=45, b=20),
-        legend_title_text="",
+    total_sales = filtered_sales["sales"].sum()
+    avg_daily = (
+        filtered_sales.groupby("date")["sales"].sum().mean()
+        if not filtered_sales.empty else 0
     )
-    fig.update_xaxes(showgrid=False, zeroline=False)
-    fig.update_yaxes(gridcolor="#E4DCCF", zeroline=False)
-    st.plotly_chart(fig, use_container_width=True)
+    number_days = filtered_sales["date"].nunique()
+    number_stores = filtered_sales["store_nbr"].nunique()
+    number_families = filtered_sales["family"].nunique()
 
-# ---------- Shared report data ----------
-model_comparison = read_csv_report("model_comparison.csv")
-if model_comparison.empty:
-    model_comparison = read_csv_report("validated_model_metrics.csv")
-backtest = read_csv_report("stage7_recursive_predictions.csv")
-cross_origin = read_csv_report("stage15_cross_origin_overall_comparison.csv")
-horizon_backtest = read_csv_report("stage15_cross_origin_by_horizon.csv")
-readiness_summary = read_json_report("stage15_final_readiness_summary.json")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total historical sales", fmt_number(total_sales))
+    k2.metric("Average daily sales", fmt_number(avg_daily, 1))
+    k3.metric("Stores selected", fmt_number(number_stores))
+    k4.metric("Families selected", fmt_number(number_families))
+    k5.metric("Days represented", fmt_number(number_days))
 
-# ---------- Pages ----------
-
-if page == "Executive Overview":
-    show_hero("Demand Intelligence", "AI-powered demand forecasting and inventory planning for supermarket retail.")
-    st.markdown("### Global filters")
-    st.caption("Choose the historical scope used by the dashboard. Filters are shared across pages.")
-
-    with st.container(border=True):
-        f1, f2 = st.columns(2)
-        with f1:
-            new_stores = st.multiselect(
-                "Stores", stores_all, default=selected_stores, key="overview_store_filter"
-            )
-        with f2:
-            new_families = st.multiselect(
-                "Product families", families_all, default=selected_families, key="overview_family_filter"
-            )
-        f3, f4, f5 = st.columns([1, 1, 1])
-        with f3:
-            new_start = st.date_input(
-                "Historical start date", value=start_date.date(),
-                min_value=first_history_date.date(), max_value=last_history_date.date(),
-                key="overview_start_filter",
-            )
-        with f4:
-            new_end = st.date_input(
-                "Historical end date", value=end_date.date(),
-                min_value=first_history_date.date(), max_value=last_history_date.date(),
-                key="overview_end_filter",
-            )
-        with f5:
-            st.selectbox("Forecast model", list(model_options.keys()), index=list(model_options.keys()).index(preferred_label), key="overview_model")
-        if st.button("Apply dashboard filters", type="primary", use_container_width=True):
-            st.session_state.global_stores = new_stores or stores_all
-            st.session_state.global_families = new_families or families_all
-            st.session_state.global_start = new_start
-            st.session_state.global_end = new_end
-            chosen_label = st.session_state.overview_model
-            st.session_state.selected_model_path = str(model_options[chosen_label])
-            st.rerun()
-
-    # Model selector can be changed dynamically without needing a separate page.
-    if "overview_model" in st.session_state:
-        st.session_state.selected_model_path = str(model_options[st.session_state.overview_model])
+    if filtered_sales.empty:
+        st.warning("No historical rows match these filters.")
     else:
-        st.session_state.selected_model_path = str(model_options[preferred_label])
+        daily = daily_history(filtered_sales)
+        c1, c2 = st.columns([1.65, 1])
+        with c1:
+            section_header("Historical demand trend")
+            fig = px.line(
+                daily, x="date", y="sales",
+                labels={"date": "Date", "sales": "Sales"},
+            )
+            fig.update_traces(line=dict(color=COLORS["teal"], width=2))
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
 
-    forecast_horizon = st.selectbox("Forecast horizon", [7, 14, 30, 60], index=0, format_func=lambda x: f"{x} days", key="overview_horizon")
-    st.session_state.forecast_horizon = forecast_horizon
+        with c2:
+            section_header("Sales by product family")
+            fam = (
+                filtered_sales.groupby("family", as_index=False)["sales"]
+                .sum().sort_values("sales", ascending=True).tail(12)
+            )
+            fig = px.bar(
+                fam, x="sales", y="family", orientation="h",
+                labels={"sales": "Sales", "family": "Product family"},
+            )
+            fig.update_traces(marker_color=COLORS["teal"])
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
 
-    actual_total = float(filtered["sales"].sum()) if not filtered.empty else 0.0
-    daily_avg = float(filtered.groupby("date")["sales"].sum().mean()) if not filtered.empty else 0.0
-    fc = current_forecast(forecast_horizon)
-    fc_total = float(fc["forecast_demand"].sum()) if not fc.empty else 0.0
-    model = load_model(st.session_state.selected_model_path, Path(st.session_state.selected_model_path).stat().st_mtime)
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Historical sales in scope", money(actual_total))
-    m2.metric("Average daily sales", money(daily_avg))
-    m3.metric(f"Forecast demand · {forecast_horizon} days", money(fc_total))
-    m4.metric("Stores / families", f"{len(selected_stores)} / {len(selected_families)}")
-
-    st.caption(
-        f"Historical scope: {start_date:%d %b %Y} – {end_date:%d %b %Y}. "
-        f"Forecast starts {last_history_date + pd.Timedelta(days=1):%d %b %Y}; "
-        "future sales are model estimates, not observed results."
+    st.divider()
+    section_header("Forecast preview")
+    horizon = st.selectbox(
+        "Future forecast horizon",
+        [7, 14, 30, 60],
+        index=0,
+        key="overview_horizon",
     )
+    if st.button("Generate forecast preview", type="primary"):
+        try:
+            with st.spinner(
+                f"Generating recursive {horizon}-day forecasts..."
+            ):
+                forecast_all, forecast_origin = generate_recursive_forecast(
+                    horizon,
+                    str(DATA_PATH), DATA_PATH.stat().st_mtime,
+                    str(MODEL_PATH), MODEL_PATH.stat().st_mtime,
+                )
+            forecast_filtered = forecast_all[
+                forecast_all["store_nbr"].isin(filters["stores"])
+                & forecast_all["family"].isin(filters["families"])
+            ]
+            st.session_state["forecast_cache"] = forecast_all
+            st.session_state["forecast_origin"] = forecast_origin
+            st.session_state["forecast_horizon"] = horizon
+            st.session_state["forecast_filter_preview"] = forecast_filtered
+            st.success(
+                f"Forecast generated from {forecast_origin:%Y-%m-%d} "
+                f"for {horizon} future days."
+            )
+        except Exception as exc:
+            st.error(f"Forecast generation failed: {exc}")
 
-    st.markdown("### Forecast demand timeline")
-    if not fc.empty:
-        daily_fc = fc.groupby("forecast_date", as_index=False)["forecast_demand"].sum()
-        fig = px.area(daily_fc, x="forecast_date", y="forecast_demand", markers=True)
-        fig.update_traces(line_color=C["blue"], fillcolor="rgba(8,117,209,0.48)")
-        fig.update_yaxes(title="Predicted sales")
-        fig.update_xaxes(title="Forecast date")
-        chart_layout(fig, 380)
-        family_fc = fc.groupby("family", as_index=False)["forecast_demand"].sum().sort_values("forecast_demand", ascending=False).head(15)
-        fig2 = px.bar(family_fc.sort_values("forecast_demand"), x="forecast_demand", y="family", orientation="h", title="Forecast contribution by product family")
-        fig2.update_traces(marker_color=C["blue"])
-        fig2.update_xaxes(title="Predicted sales")
-        fig2.update_yaxes(title="")
-        chart_layout(fig2, 500)
-        st.download_button(
-            "Download current forecast CSV",
-            fc.to_csv(index=False).encode("utf-8"),
-            file_name=f"demand_forecast_{forecast_horizon}d.csv",
-            mime="text/csv",
+    preview = st.session_state.get("forecast_filter_preview")
+    if isinstance(preview, pd.DataFrame) and not preview.empty:
+        st.metric(
+            "Forecasted demand in selected scope",
+            fmt_number(preview["predicted_sales"].sum()),
         )
+        preview_daily = (
+            preview.groupby("date", as_index=False)["predicted_sales"]
+            .sum()
+        )
+        fig = px.line(
+            preview_daily, x="date", y="predicted_sales",
+            labels={"date": "Forecast date", "predicted_sales": "Predicted sales"},
+        )
+        fig.update_traces(line=dict(color=COLORS["orange"], width=2))
+        st.plotly_chart(make_chart_theme(fig), use_container_width=True)
+        add_csv_download(preview, "filtered_future_demand_forecast.csv")
+
+# ================================================================
+# DEMAND FORECASTING
+# ================================================================
 
 elif page == "Demand Forecasting":
-    show_hero("Demand Forecasting", "Generate recursive daily forecasts from the saved model pipeline.")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        horizon = st.selectbox("Forecast horizon", [7, 14, 30, 60], key="demand_horizon")
-    with col2:
-        promo_mode = st.selectbox("Promotion assumption", ["Use recent average", "Zero promotion", "Recent maximum"], key="demand_promo")
-    with col3:
-        st.metric("Forecast model", Path(st.session_state.get("selected_model_path", str(model_options[preferred_label]))).stem)
-    fc = current_forecast(horizon, promotion_mode=promo_mode)
-    if fc.empty:
-        st.warning("No forecast rows were generated for the current filters.")
-    else:
-        daily = fc.groupby("forecast_date", as_index=False)["forecast_demand"].sum()
-        a, b, c = st.columns(3)
-        a.metric("Forecast total", money(fc["forecast_demand"].sum()))
-        b.metric("Daily average", money(daily["forecast_demand"].mean()))
-        c.metric("Forecast rows", f"{len(fc):,}")
-        fig = px.line(daily, x="forecast_date", y="forecast_demand", markers=True, title="Daily predicted demand")
-        fig.update_traces(line_color=C["blue"])
-        chart_layout(fig, 400)
-        fig = px.bar(fc.groupby("store_nbr", as_index=False)["forecast_demand"].sum().sort_values("forecast_demand", ascending=False), x="store_nbr", y="forecast_demand", title="Forecast demand by store")
-        fig.update_traces(marker_color=C["blue"])
-        chart_layout(fig, 400)
-        st.dataframe(fc.sort_values("forecast_demand", ascending=False), use_container_width=True, hide_index=True)
-        st.download_button("Download forecast", fc.to_csv(index=False).encode(), f"forecast_{horizon}d.csv", "text/csv")
-        if st.button("Save this forecast to project storage", type="primary"):
-            path = save_csv(fc, FORECAST_DIR / f"forecast_{horizon}d_{pd.Timestamp.now():%Y%m%d_%H%M%S}.csv")
-            st.success(f"Forecast saved to {path}")
+    section_header(
+        "Demand Forecasting",
+        "Future forecasts are generated recursively from the last date "
+        "in the historical dataset—not from today's date."
+    )
+    st.markdown(
+        f'<div class="section-note">Last observed historical date: '
+        f'<b>{last_history_date:%Y-%m-%d}</b>. Future promotions are '
+        f'assumed to be zero. Negative predictions are clipped to zero. '
+        f'Missing historical dates within each store-family series are '
+        f'filled with zero sales.</div>',
+        unsafe_allow_html=True,
+    )
 
-elif page == "Inventory Optimizer":
-    show_hero("Inventory Optimizer", "Forecast-driven replenishment planning with explicit, configurable assumptions.")
-    show_note("SIMULATED INVENTORY: the dataset does not contain live stock-on-hand, supplier lead times, purchase orders, or SKU-level records. Recommendations are planning estimates, not live inventory facts.")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        lead_days = st.number_input("Assumed supplier lead time (days)", min_value=1, max_value=60, value=7)
-    with c2:
-        review_days = st.number_input("Review cycle (days)", min_value=1, max_value=30, value=7)
-    with c3:
-        service_level = st.selectbox("Target service level", [0.90, 0.95, 0.975, 0.99], index=1, format_func=lambda x: f"{x:.1%}")
-    with c4:
-        assumed_stock_days = st.number_input("Assumed stock cover (days)", min_value=0, max_value=120, value=7)
-    z_lookup = {0.90: 1.282, 0.95: 1.645, 0.975: 1.960, 0.99: 2.326}
-    horizon = min(60, max(14, int(lead_days + review_days + 7)))
-    fc = current_forecast(horizon)
-    if not fc.empty:
-        grp = fc.groupby(["store_nbr", "family"]).agg(
-            forecast_total=("forecast_demand", "sum"),
-            daily_mean=("forecast_demand", "mean"),
-            daily_std=("forecast_demand", "std"),
-        ).reset_index()
-        grp["daily_std"] = grp["daily_std"].fillna(0)
-        grp["safety_stock_simulated"] = z_lookup[service_level] * grp["daily_std"] * np.sqrt(lead_days)
-        grp["reorder_point_simulated"] = grp["daily_mean"] * lead_days + grp["safety_stock_simulated"]
-        grp["assumed_stock_simulated"] = grp["daily_mean"] * assumed_stock_days
-        grp["suggested_order_simulated"] = np.maximum(
-            0, grp["reorder_point_simulated"] + grp["daily_mean"] * review_days - grp["assumed_stock_simulated"]
+    c1, c2, c3 = st.columns(3)
+    horizon = c1.selectbox(
+        "Forecast horizon (days)", [7, 14, 30, 60], index=0
+    )
+    store_options = filters["stores"]
+    family_options = filters["families"]
+    forecast_store = c2.selectbox("Store", store_options)
+    forecast_family = c3.selectbox("Product family", family_options)
+
+    if st.button("Run recursive forecast", type="primary"):
+        try:
+            with st.spinner("Generating recursive forecasts..."):
+                future, origin = generate_recursive_forecast(
+                    horizon,
+                    str(DATA_PATH), DATA_PATH.stat().st_mtime,
+                    str(MODEL_PATH), MODEL_PATH.stat().st_mtime,
+                )
+            st.session_state["forecast_cache"] = future
+            st.session_state["forecast_origin"] = origin
+            st.session_state["forecast_horizon"] = horizon
+            st.success(f"Forecast generated. Origin date: {origin:%Y-%m-%d}")
+        except Exception as exc:
+            st.error(f"Forecast generation failed: {exc}")
+
+    future = st.session_state.get("forecast_cache")
+    if isinstance(future, pd.DataFrame) and not future.empty:
+        selected = future[
+            (future["store_nbr"] == forecast_store)
+            & (future["family"] == forecast_family)
+        ].copy()
+
+        if selected.empty:
+            st.warning("No forecasts found for this selection.")
+        else:
+            a, b, c = st.columns(3)
+            a.metric("Forecast total", fmt_number(selected["predicted_sales"].sum()))
+            b.metric("Average per day", fmt_number(selected["predicted_sales"].mean(), 2))
+            c.metric("Peak forecast day", fmt_number(selected["predicted_sales"].max(), 2))
+
+            fig = px.line(
+                selected, x="date", y="predicted_sales",
+                markers=True,
+                labels={"date": "Forecast date", "predicted_sales": "Predicted sales"},
+            )
+            fig.update_traces(line=dict(color=COLORS["teal"], width=3))
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
+            add_csv_download(selected, "demand_forecast.csv")
+
+            st.dataframe(
+                selected[[
+                    "date", "horizon_step", "store_nbr", "family",
+                    "predicted_sales", "forecast_assumption"
+                ]],
+                use_container_width=True,
+                hide_index=True,
+            )
+    else:
+        st.info("Choose a horizon and click **Run recursive forecast**.")
+
+# ================================================================
+# INVENTORY OPTIMIZATION
+# ================================================================
+
+elif page == "Inventory Optimization":
+    section_header(
+        "Inventory Optimization",
+        "Planning estimates only. This dataset does not contain verified "
+        "on-hand inventory, purchase orders, or supplier lead times."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    inv_store = c1.selectbox("Store", filters["stores"], key="inv_store")
+    inv_family = c2.selectbox(
+        "Product family", filters["families"], key="inv_family"
+    )
+    lead_time = c3.number_input(
+        "Assumed supplier lead time (days)", 1, 90, 7
+    )
+
+    c4, c5, c6 = st.columns(3)
+    review_period = c4.number_input(
+        "Review period (days)", 1, 60, 7
+    )
+    service_level = c5.selectbox(
+        "Target service level",
+        [0.90, 0.95, 0.975, 0.99],
+        index=1,
+        format_func=lambda x: f"{x:.1%}",
+    )
+    stock_on_hand = c6.number_input(
+        "Assumed stock on hand (units)", min_value=0.0,
+        value=0.0, step=10.0,
+        help="Enter an assumed value; it is not read from the dataset."
+    )
+
+    z_values = {0.90: 1.282, 0.95: 1.645, 0.975: 1.960, 0.99: 2.326}
+    hist_series = (
+        sales[
+            (sales["store_nbr"] == inv_store)
+            & (sales["family"] == inv_family)
+        ]
+        .sort_values("date")
+        .set_index("date")["sales"]
+        .asfreq("D", fill_value=0)
+    )
+
+    if hist_series.empty:
+        st.warning("No historical series is available for this selection.")
+    else:
+        recent = hist_series.tail(28)
+        mean_daily = float(recent.mean())
+        std_daily = float(recent.std(ddof=1)) if len(recent) > 1 else 0.0
+        safety_stock = z_values[service_level] * std_daily * np.sqrt(lead_time)
+        reorder_point = mean_daily * lead_time + safety_stock
+        protection_demand = mean_daily * (lead_time + review_period)
+        suggested_order = max(
+            0.0, mean_daily * (lead_time + review_period)
+            + safety_stock - stock_on_hand
         )
-        grp["risk"] = np.select(
-            [
-                grp["assumed_stock_simulated"] <= grp["daily_mean"] * lead_days,
-                grp["assumed_stock_simulated"] < grp["reorder_point_simulated"],
-            ],
-            ["High", "Medium"],
-            default="Low",
+
+        a, b, c, d = st.columns(4)
+        a.metric("Recent average daily demand", fmt_number(mean_daily, 2))
+        b.metric("Estimated safety stock", fmt_number(safety_stock, 2))
+        c.metric("Estimated reorder point", fmt_number(reorder_point, 2))
+        d.metric("Suggested order estimate", fmt_number(suggested_order, 2))
+
+        st.markdown(
+            f'<div class="section-note">Formula assumptions: safety stock = '
+            f'z × recent daily-demand standard deviation × √lead time; '
+            f'reorder point = average daily demand × lead time + safety stock. '
+            f'The suggested order estimate covers lead time plus review period. '
+            f'It is not a purchase order recommendation.</div>',
+            unsafe_allow_html=True,
         )
-        x1, x2, x3 = st.columns(3)
-        x1.metric("High simulated-risk pairs", int((grp["risk"] == "High").sum()))
-        x2.metric("Pairs below reorder point", int((grp["assumed_stock_simulated"] < grp["reorder_point_simulated"]).sum()))
-        x3.metric("Suggested simulated order units", money(grp["suggested_order_simulated"].sum()))
-        fig = px.bar(grp.groupby("risk", as_index=False).size(), x="risk", y="size", title="Simulated risk distribution", category_orders={"risk": RISK_ORDER}, color="risk", color_discrete_map={"High": C["red"], "Medium": C["orange"], "Low": C["green"]})
-        chart_layout(fig, 330)
-        st.dataframe(grp.sort_values("suggested_order_simulated", ascending=False), use_container_width=True, hide_index=True)
-        st.download_button("Download simulated inventory plan", grp.to_csv(index=False).encode(), "simulated_inventory_plan.csv", "text/csv")
-        if st.button("Save inventory assumptions and plan"):
-            SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-            settings = {
-                "lead_time_days": lead_days, "review_cycle_days": review_days,
-                "service_level": service_level, "assumed_stock_cover_days": assumed_stock_days,
-                "inventory_status": "SIMULATED — not live stock data",
-                "saved_at": pd.Timestamp.now().isoformat(),
-            }
-            save_json(settings, SETTINGS_DIR / "inventory_assumptions.json")
-            save_csv(grp, EXPORT_DIR / f"simulated_inventory_{pd.Timestamp.now():%Y%m%d_%H%M%S}.csv")
-            st.success("Assumptions and simulated plan saved to generated/.")
+
+        inventory_table = pd.DataFrame([{
+            "store_nbr": inv_store,
+            "family": inv_family,
+            "recent_28_day_average_daily_demand": mean_daily,
+            "recent_28_day_daily_std_dev": std_daily,
+            "assumed_lead_time_days": lead_time,
+            "assumed_review_period_days": review_period,
+            "service_level": service_level,
+            "estimated_safety_stock": safety_stock,
+            "estimated_reorder_point": reorder_point,
+            "assumed_stock_on_hand": stock_on_hand,
+            "estimated_suggested_order": suggested_order,
+        }])
+        st.dataframe(inventory_table, use_container_width=True, hide_index=True)
+        add_csv_download(inventory_table, "inventory_planning_estimate.csv")
+
+        st.caption(
+            "Historical daily sales are used as a demand proxy. "
+            "Sales are not necessarily equivalent to units sold for every "
+            "product-family interpretation, and stock availability is unknown."
+        )
+
+# ================================================================
+# SMART ALERTS
+# ================================================================
 
 elif page == "Smart Alerts":
-    show_hero("Smart Alerts", "Risk signals recalculated from the selected forecast and your planning thresholds.")
-    a, b, c = st.columns(3)
-    with a:
-        horizon = st.selectbox("Forecast horizon", [7, 14, 30, 60], key="alerts_horizon")
-    with b:
-        high_threshold = st.number_input("High-risk daily demand threshold", min_value=0.0, value=1000.0, step=100.0)
-    with c:
-        low_threshold = st.number_input("Low-demand alert threshold", min_value=0.0, value=10.0, step=1.0)
-    fc = current_forecast(horizon)
-    if not fc.empty:
-        by_pair = fc.groupby(["store_nbr", "family"]).agg(
-            total_forecast=("forecast_demand", "sum"),
-            avg_daily=("forecast_demand", "mean"),
-            peak_daily=("forecast_demand", "max"),
-        ).reset_index()
-        by_pair["alert"] = np.select(
-            [by_pair["peak_daily"] >= high_threshold, by_pair["avg_daily"] <= low_threshold],
-            ["High forecast demand", "Low forecast demand"],
-            default="Monitor",
+    section_header(
+        "Smart Alerts",
+        "Alerts are calculated from historical demand and forecast results. "
+        "They are not live stockout notifications."
+    )
+
+    alert_horizon = st.selectbox(
+        "Alert forecast horizon (days)", [7, 14, 30], index=0
+    )
+    if st.button("Calculate smart alerts", type="primary"):
+        try:
+            future, origin = generate_recursive_forecast(
+                alert_horizon,
+                str(DATA_PATH), DATA_PATH.stat().st_mtime,
+                str(MODEL_PATH), MODEL_PATH.stat().st_mtime,
+            )
+            scope = future[
+                future["store_nbr"].isin(filters["stores"])
+                & future["family"].isin(filters["families"])
+            ]
+            totals = (
+                scope.groupby(["store_nbr", "family"], as_index=False)
+                .agg(
+                    forecast_total=("predicted_sales", "sum"),
+                    forecast_daily_average=("predicted_sales", "mean"),
+                    peak_daily_forecast=("predicted_sales", "max"),
+                )
+            )
+            historical = sales[
+                sales["store_nbr"].isin(filters["stores"])
+                & sales["family"].isin(filters["families"])
+            ].copy()
+
+            recent_date = historical["date"].max()
+            last7 = historical[
+                historical["date"] > recent_date - pd.Timedelta(days=7)
+            ].groupby(["store_nbr", "family"])["sales"].mean()
+            previous7 = historical[
+                (historical["date"] <= recent_date - pd.Timedelta(days=7))
+                & (historical["date"] > recent_date - pd.Timedelta(days=14))
+            ].groupby(["store_nbr", "family"])["sales"].mean()
+
+            totals["recent_7_day_average"] = [
+                safe_float(last7.get((r.store_nbr, r.family), 0))
+                for r in totals.itertuples()
+            ]
+            totals["previous_7_day_average"] = [
+                safe_float(previous7.get((r.store_nbr, r.family), 0))
+                for r in totals.itertuples()
+            ]
+            totals["change_vs_previous_week_percent"] = np.where(
+                totals["previous_7_day_average"] > 0,
+                100 * (
+                    totals["recent_7_day_average"]
+                    - totals["previous_7_day_average"]
+                ) / totals["previous_7_day_average"],
+                np.nan,
+            )
+
+            totals["alert"] = np.select(
+                [
+                    totals["change_vs_previous_week_percent"] >= 25,
+                    totals["forecast_total"] >= totals["forecast_total"].quantile(0.90),
+                    totals["forecast_total"] <= totals["forecast_total"].quantile(0.10),
+                ],
+                [
+                    "Demand rising sharply",
+                    "High forecast demand",
+                    "Low forecast demand",
+                ],
+                default="Monitor",
+            )
+            totals["priority"] = np.select(
+                [
+                    totals["alert"] == "Demand rising sharply",
+                    totals["alert"] == "High forecast demand",
+                    totals["alert"] == "Low forecast demand",
+                ],
+                ["High", "Medium", "Review"],
+                default="Normal",
+            )
+            totals = totals.sort_values(
+                ["priority", "forecast_total"],
+                ascending=[True, False],
+            )
+
+            st.session_state["smart_alerts"] = totals
+            st.success(f"Calculated {len(totals):,} store-family alert records.")
+        except Exception as exc:
+            st.error(f"Could not calculate alerts: {exc}")
+
+    alerts = st.session_state.get("smart_alerts")
+    if isinstance(alerts, pd.DataFrame) and not alerts.empty:
+        a, b, c = st.columns(3)
+        a.metric("High-priority alerts", int((alerts["priority"] == "High").sum()))
+        b.metric("High forecast-demand records", int((alerts["alert"] == "High forecast demand").sum()))
+        c.metric("Demand-rise alerts", int((alerts["alert"] == "Demand rising sharply").sum()))
+
+        priority_choice = st.multiselect(
+            "Priority filter",
+            ["High", "Medium", "Review", "Normal"],
+            default=["High", "Medium", "Review"],
         )
-        by_pair["priority"] = np.select(
-            [by_pair["alert"] == "High forecast demand", by_pair["alert"] == "Low forecast demand"],
-            ["High", "Medium"], default="Low"
+        shown = alerts[alerts["priority"].isin(priority_choice)]
+        st.dataframe(shown, use_container_width=True, hide_index=True)
+        add_csv_download(shown, "smart_alerts_action_list.csv")
+        st.caption(
+            "A high-priority alert indicates a sharp rise in observed "
+            "recent demand, not a confirmed stockout. Stockout status "
+            "requires real inventory records."
         )
-        alerts = by_pair[by_pair["alert"] != "Monitor"].sort_values(["priority", "total_forecast"], ascending=[True, False])
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Triggered alerts", len(alerts))
-        m2.metric("High demand alerts", int((alerts["alert"] == "High forecast demand").sum()))
-        m3.metric("Low demand alerts", int((alerts["alert"] == "Low forecast demand").sum()))
-        if alerts.empty:
-            st.success("No alert conditions were triggered under the current thresholds.")
-        else:
-            st.dataframe(alerts, use_container_width=True, hide_index=True)
-            st.download_button("Download action list", alerts.to_csv(index=False).encode(), "smart_alert_action_list.csv", "text/csv")
-            if st.button("Save current alert list"):
-                path = save_csv(alerts, EXPORT_DIR / f"smart_alerts_{pd.Timestamp.now():%Y%m%d_%H%M%S}.csv")
-                st.success(f"Saved to {path}")
+    else:
+        st.info("Click **Calculate smart alerts** to generate the current alert list.")
+
+# ================================================================
+# SALES EXPLORER
+# ================================================================
 
 elif page == "Sales Explorer":
-    show_hero("Sales Explorer", "Explore observed historical sales using the current global scope.")
-    if filtered.empty:
-        st.warning("No historical rows match the current global filters.")
+    section_header(
+        "Sales Explorer",
+        "Explore the underlying historical sales data using interactive filters."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    explorer_stores = c1.multiselect(
+        "Stores", filters["stores"], default=filters["stores"]
+    )
+    explorer_families = c2.multiselect(
+        "Product families", filters["families"], default=filters["families"]
+    )
+    grain = c3.selectbox("Time aggregation", ["Daily", "Weekly", "Monthly"])
+
+    data = sales[
+        sales["store_nbr"].isin(explorer_stores)
+        & sales["family"].isin(explorer_families)
+        & sales["date"].between(
+            pd.Timestamp(filters["start"]),
+            pd.Timestamp(filters["end"]),
+        )
+    ].copy()
+
+    if data.empty:
+        st.warning("No records match the current selections.")
     else:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Historical sales", money(filtered["sales"].sum()))
-        c2.metric("Daily average", money(filtered.groupby("date")["sales"].sum().mean()))
-        c3.metric("Records in view", f"{len(filtered):,}")
-        daily = filtered.groupby("date", as_index=False)["sales"].sum()
-        fig = px.line(daily, x="date", y="sales", title="Observed daily sales")
-        fig.update_traces(line_color=C["blue"])
-        chart_layout(fig, 390)
-        family = filtered.groupby("family", as_index=False)["sales"].sum().sort_values("sales", ascending=False).head(20)
-        fig = px.bar(family.sort_values("sales"), x="sales", y="family", orientation="h", title="Top product families by observed sales")
-        fig.update_traces(marker_color=C["blue"])
-        chart_layout(fig, 500)
-        store = filtered.groupby("store_nbr", as_index=False)["sales"].sum().sort_values("sales", ascending=False)
-        fig = px.bar(store, x="store_nbr", y="sales", title="Observed sales by store")
-        fig.update_traces(marker_color=C["blue"])
-        chart_layout(fig, 380)
-        st.dataframe(filtered, use_container_width=True, hide_index=True)
-        st.download_button("Download filtered historical sales", filtered.to_csv(index=False).encode(), "filtered_historical_sales.csv", "text/csv")
+        c1.metric("Sales in selection", fmt_number(data["sales"].sum()))
+        c2.metric("Rows", fmt_number(len(data)))
+        c3.metric("Mean row sales", fmt_number(data["sales"].mean(), 2))
+
+        freq = {"Daily": "D", "Weekly": "W", "Monthly": "MS"}[grain]
+        trend = (
+            data.set_index("date")
+            .groupby("family")["sales"]
+            .resample(freq)
+            .sum()
+            .reset_index()
+        )
+        fig = px.line(
+            trend, x="date", y="sales", color="family",
+            labels={"date": "Date", "sales": "Sales", "family": "Family"},
+        )
+        st.plotly_chart(make_chart_theme(fig), use_container_width=True)
+
+        family_rank = (
+            data.groupby("family", as_index=False)["sales"]
+            .sum().sort_values("sales", ascending=False)
+        )
+        store_rank = (
+            data.groupby("store_nbr", as_index=False)["sales"]
+            .sum().sort_values("sales", ascending=False)
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            section_header("Product-family ranking")
+            st.dataframe(family_rank, use_container_width=True, hide_index=True)
+        with c2:
+            section_header("Store ranking")
+            st.dataframe(store_rank, use_container_width=True, hide_index=True)
+
+        add_csv_download(data, "sales_explorer_filtered_data.csv")
+
+# ================================================================
+# WHAT-IF SIMULATOR
+# ================================================================
 
 elif page == "What-if Simulator":
-    show_hero("What-if Simulator", "Estimate demand changes under transparent promotion and demand-shock assumptions.")
-    show_note("Scenario outputs are simulated. They are not causal estimates; promotion response is not learned from a dedicated causal model.")
+    section_header(
+        "What-if Simulator",
+        "Change planning assumptions and recalculate inventory requirements. "
+        "These values are simulations, not live stock data."
+    )
+
+    c1, c2 = st.columns(2)
+    sim_store = c1.selectbox("Store", filters["stores"], key="sim_store")
+    sim_family = c2.selectbox(
+        "Product family", filters["families"], key="sim_family"
+    )
+
     c1, c2, c3 = st.columns(3)
-    with c1:
-        horizon = st.selectbox("Forecast horizon", [7, 14, 30, 60], key="whatif_horizon")
-    with c2:
-        demand_change = st.slider("Demand shock", -50, 100, 0, step=5, format="%d%%")
-    with c3:
-        promotion_change = st.slider("Promotion proxy adjustment", 0, 100, 0, step=5, format="%d%%")
-    fc = current_forecast(horizon)
-    if not fc.empty:
-        baseline = float(fc["forecast_demand"].sum())
-        # Transparent scenario arithmetic, not a model retraining or causal claim.
-        scenario_factor = max(0, 1 + demand_change / 100) * (1 + promotion_change / 100)
-        scenario_total = baseline * scenario_factor
+    demand_change = c1.slider("Demand change", -50, 100, 10, step=5)
+    sim_lead_time = c2.slider("Lead time (days)", 1, 60, 7)
+    sim_review = c3.slider("Review period (days)", 1, 30, 7)
+
+    c1, c2, c3 = st.columns(3)
+    sim_service = c1.selectbox(
+        "Service level", [0.90, 0.95, 0.975, 0.99],
+        index=1, format_func=lambda x: f"{x:.1%}"
+    )
+    sim_stock = c2.number_input(
+        "Assumed available stock", min_value=0.0, value=100.0, step=10.0
+    )
+    sim_promotion = c3.selectbox(
+        "Promotion scenario",
+        ["No additional promotion adjustment",
+         "Increase demand by an extra 10%",
+         "Increase demand by an extra 20%"],
+    )
+
+    series = (
+        sales[
+            (sales["store_nbr"] == sim_store)
+            & (sales["family"] == sim_family)
+        ]
+        .sort_values("date")
+        .set_index("date")["sales"]
+        .asfreq("D", fill_value=0)
+    )
+
+    if series.empty:
+        st.warning("No historical series is available.")
+    else:
+        avg = float(series.tail(28).mean())
+        std = float(series.tail(28).std(ddof=1)) if len(series.tail(28)) > 1 else 0.0
+
+        promo_factor = {
+            "No additional promotion adjustment": 1.0,
+            "Increase demand by an extra 10%": 1.10,
+            "Increase demand by an extra 20%": 1.20,
+        }[sim_promotion]
+        adjusted_avg = avg * (1 + demand_change / 100) * promo_factor
+        adjusted_std = std * (1 + max(demand_change, 0) / 100) * promo_factor
+
+        z = {0.90: 1.282, 0.95: 1.645, 0.975: 1.960, 0.99: 2.326}[sim_service]
+        safety = z * adjusted_std * np.sqrt(sim_lead_time)
+        reorder = adjusted_avg * sim_lead_time + safety
+        target = adjusted_avg * (sim_lead_time + sim_review) + safety
+        order_qty = max(0, target - sim_stock)
+
+        baseline_safety = 1.645 * std * np.sqrt(7)
+        baseline_reorder = avg * 7 + baseline_safety
+        baseline_order = max(0, avg * 14 + baseline_safety - sim_stock)
+
         a, b, c = st.columns(3)
-        a.metric("Baseline model forecast", money(baseline))
-        b.metric("Scenario forecast", money(scenario_total), delta=f"{scenario_total-baseline:,.0f}")
-        c.metric("Scenario change", f"{(scenario_factor-1)*100:.1f}%")
-        scenario = fc[["forecast_date", "store_nbr", "family", "forecast_demand"]].copy()
-        scenario["baseline_demand"] = scenario["forecast_demand"]
-        scenario["scenario_demand_simulated"] = scenario["baseline_demand"] * scenario_factor
-        daily = scenario.groupby("forecast_date", as_index=False)[["baseline_demand", "scenario_demand_simulated"]].sum()
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=daily["forecast_date"], y=daily["baseline_demand"], mode="lines+markers", name="Baseline"))
-        fig.add_trace(go.Scatter(x=daily["forecast_date"], y=daily["scenario_demand_simulated"], mode="lines+markers", name="What-if scenario"))
-        chart_layout(fig, 390)
-        st.dataframe(scenario, use_container_width=True, hide_index=True)
-        st.download_button("Download scenario results", scenario.to_csv(index=False).encode(), "what_if_scenario.csv", "text/csv")
-        if st.button("Save what-if scenario"):
-            save_csv(scenario, EXPORT_DIR / f"what_if_{pd.Timestamp.now():%Y%m%d_%H%M%S}.csv")
-            save_json({
-                "horizon_days": horizon, "demand_shock_percent": demand_change,
-                "promotion_proxy_adjustment_percent": promotion_change,
-                "scenario_factor": scenario_factor,
-                "label": "SIMULATED WHAT-IF; not a causal estimate",
-                "saved_at": pd.Timestamp.now().isoformat(),
-            }, SETTINGS_DIR / "last_what_if_scenario.json")
-            st.success("Scenario and assumptions saved.")
+        a.metric(
+            "Scenario reorder point", fmt_number(reorder, 2),
+            delta=fmt_number(reorder - baseline_reorder, 2) + " vs baseline",
+        )
+        b.metric(
+            "Scenario safety stock", fmt_number(safety, 2),
+            delta=fmt_number(safety - baseline_safety, 2) + " vs baseline",
+        )
+        c.metric(
+            "Estimated order quantity", fmt_number(order_qty, 2),
+            delta=fmt_number(order_qty - baseline_order, 2) + " vs baseline",
+        )
+
+        comparison = pd.DataFrame([
+            {
+                "scenario": "Baseline assumptions",
+                "average_daily_demand": avg,
+                "safety_stock": baseline_safety,
+                "reorder_point": baseline_reorder,
+                "estimated_order_quantity": baseline_order,
+            },
+            {
+                "scenario": "Selected what-if scenario",
+                "average_daily_demand": adjusted_avg,
+                "safety_stock": safety,
+                "reorder_point": reorder,
+                "estimated_order_quantity": order_qty,
+            },
+        ])
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
+        fig = px.bar(
+            comparison, x="scenario",
+            y=["safety_stock", "reorder_point", "estimated_order_quantity"],
+            barmode="group",
+            labels={"value": "Estimated units", "variable": "Measure"},
+        )
+        st.plotly_chart(make_chart_theme(fig), use_container_width=True)
+        add_csv_download(comparison, "what_if_simulation.csv")
+
+        st.caption(
+            "Promotion adjustments are user-defined scenarios. They are not "
+            "learned promotion effects from the trained model."
+        )
+
+# ================================================================
+# MODEL EVALUATION
+# ================================================================
 
 elif page == "Model Evaluation":
-    show_hero(
+    section_header(
         "Model Evaluation",
-        "Compare the saved model pipelines using the same chronological holdout and transparent error metrics."
+        "Use the saved evaluation reports. One-step validation and recursive "
+        "multi-day backtesting are different evaluation settings."
     )
 
-    st.markdown("### Saved model artifacts")
-    artifact_rows = []
-    for label, path in sorted(model_options.items()):
-        artifact_rows.append({
-            "Model": label,
-            "Artifact": path.name,
-            "Location": str(path.relative_to(APP_DIR)) if path.is_relative_to(APP_DIR) else str(path),
-            "File size (MB)": round(path.stat().st_size / (1024 * 1024), 2),
-        })
-    st.dataframe(pd.DataFrame(artifact_rows), use_container_width=True, hide_index=True)
-    st.caption(
-        "The app evaluates every distinct .joblib artifact it discovers in the repository root and model folders. "
-        "If fewer than six artifacts are present in the deployed repository, this page cannot display six distinct trained models."
-    )
+    if not stage15_overall.empty:
+        section_header("Cross-origin recursive evaluation")
+        display_cols = [
+            c for c in [
+                "method", "observations", "MAE", "RMSE",
+                "WAPE_percent", "bias_predicted_minus_actual",
+                "overforecast_rate_percent",
+            ] if c in stage15_overall.columns
+        ]
+        st.dataframe(
+            stage15_overall[display_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.markdown("### Model comparison")
-    st.caption(
-        "Metrics below are calculated from a chronological holdout using the same dates for each model. "
-        "This is one-step-ahead evaluation: actual sales from earlier dates are available for lag features. "
-        "It is not the same as a recursive 7-day forecast."
-    )
-
-    model_specs = tuple(
-        (label, str(path), float(path.stat().st_mtime))
-        for label, path in sorted(model_options.items())
-    )
-    fingerprint = f"{DATA_PATH}:{DATA_PATH.stat().st_mtime}:{len(sales_all)}"
-    validation_days = st.selectbox("Chronological validation window", [7, 14, 28], index=2, key="evaluation_days")
-
-    if st.button("Run model comparison", type="primary"):
-        st.session_state["run_saved_model_evaluation"] = True
-
-    if st.session_state.get("run_saved_model_evaluation", True):
-        try:
-            comparison, eval_errors = evaluate_saved_models(
-                fingerprint, sales_all, model_specs, int(validation_days)
+        if "method" in stage15_overall.columns and "WAPE_percent" in stage15_overall.columns:
+            fig = px.bar(
+                stage15_overall, x="method", y="WAPE_percent",
+                labels={"method": "Evaluation method", "WAPE_percent": "WAPE (%)"},
+                text="WAPE_percent",
             )
-            if not comparison.empty:
-                good = comparison[comparison["Status"] == "OK"].copy()
-                if not good.empty:
-                    best = good.iloc[0]
-                    k1, k2, k3, k4 = st.columns(4)
-                    k1.metric("Best evaluated model (lowest WAPE)", str(best["Model"]))
-                    k2.metric("Best WAPE", f"{best['WAPE (%)']:.2f}%")
-                    k3.metric("Best MAE", f"{best['MAE']:,.3f}")
-                    k4.metric("Models evaluated", f"{len(good)} / {len(comparison)}")
+            fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
 
-                    chart_df = good.sort_values("WAPE (%)", ascending=True)
-                    fig = px.bar(
-                        chart_df, x="WAPE (%)", y="Model", orientation="h",
-                        title="Chronological holdout comparison — lower WAPE is better",
-                        text="WAPE (%)",
-                    )
-                    fig.update_traces(marker_color=C["teal"], texttemplate="%{text:.2f}%")
-                    fig.update_layout(yaxis={"categoryorder": "total ascending"})
-                    chart_layout(fig, max(380, 48 * len(chart_df)))
-                st.dataframe(comparison, use_container_width=True, hide_index=True)
-                st.download_button(
-                    "Download model comparison metrics",
-                    comparison.to_csv(index=False).encode("utf-8"),
-                    file_name=f"model_comparison_{validation_days}d.csv",
-                    mime="text/csv",
-                )
-                if eval_errors:
-                    with st.expander("Model loading/evaluation errors"):
-                        st.code(eval_errors)
-            else:
-                st.warning("No model metrics could be calculated. Check the deployed model artifacts and logs.")
-        except Exception as exc:
-            st.error("Model evaluation failed.")
-            st.exception(exc)
+    if not stage15_horizon.empty:
+        section_header("Forecast error by horizon")
+        horizon_cols = [
+            c for c in [
+                "horizon_step", "observations",
+                "original_MAE", "corrected_MAE",
+                "original_RMSE", "corrected_RMSE",
+                "original_WAPE_percent", "corrected_WAPE_percent",
+            ] if c in stage15_horizon.columns
+        ]
+        st.dataframe(
+            stage15_horizon[horizon_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+        if {"horizon_step", "original_WAPE_percent", "corrected_WAPE_percent"}.issubset(stage15_horizon.columns):
+            long = stage15_horizon.melt(
+                id_vars="horizon_step",
+                value_vars=["original_WAPE_percent", "corrected_WAPE_percent"],
+                var_name="method",
+                value_name="WAPE_percent",
+            )
+            fig = px.line(
+                long, x="horizon_step", y="WAPE_percent",
+                color="method", markers=True,
+                labels={"horizon_step": "Forecast day", "WAPE_percent": "WAPE (%)"},
+            )
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
 
-    st.markdown("### Previously saved research reports")
     if not model_comparison.empty:
-        st.write("Saved model comparison report:")
+        section_header("Saved model comparison")
         st.dataframe(model_comparison, use_container_width=True, hide_index=True)
-    else:
-        st.info("No saved model-comparison report was found. The comparison above is calculated from the saved model artifacts.")
+        error_col = next(
+            (c for c in ["WAPE_percent", "MAE", "RMSE"] if c in model_comparison.columns),
+            None,
+        )
+        model_name_col = next(
+            (c for c in ["Model", "model", "method"] if c in model_comparison.columns),
+            None,
+        )
+        if error_col and model_name_col:
+            fig = px.bar(
+                model_comparison, x=model_name_col, y=error_col,
+                labels={model_name_col: "Model", error_col: error_col},
+            )
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
 
-    if not cross_origin.empty:
-        st.markdown("#### Stage 15 cross-origin comparison")
-        st.dataframe(cross_origin, use_container_width=True, hide_index=True)
-    if not horizon_backtest.empty:
-        st.markdown("#### Stage 15 performance by forecast horizon")
-        st.dataframe(horizon_backtest, use_container_width=True, hide_index=True)
-    if not readiness_summary:
-        st.caption("No final readiness JSON report was found in the configured reports folders.")
-    else:
-        with st.expander("Final readiness audit summary"):
-            st.json(readiness_summary)
+    if not backtest.empty:
+        section_header("Backtesting prediction explorer")
+        required_cols = {
+            "actual_sales", "predicted_sales", "horizon_step"
+        }
+        if required_cols.issubset(backtest.columns):
+            c1, c2 = st.columns(2)
+            chosen_step = c1.selectbox(
+                "Forecast day", sorted(backtest["horizon_step"].dropna().unique())
+            )
+            chosen_store = c2.selectbox(
+                "Store", sorted(backtest["store_nbr"].dropna().unique())
+                if "store_nbr" in backtest.columns else [None]
+            )
+            sample = backtest[backtest["horizon_step"] == chosen_step].copy()
+            if chosen_store is not None and "store_nbr" in sample.columns:
+                sample = sample[sample["store_nbr"] == chosen_store]
+            if "family" in sample.columns:
+                sample = sample[sample["family"].isin(filters["families"])]
+            if len(sample) > 1500:
+                sample = sample.sample(1500, random_state=42)
 
+            fig = px.scatter(
+                sample, x="actual_sales", y="predicted_sales",
+                color="family" if "family" in sample.columns else None,
+                hover_data=[c for c in ["date", "store_nbr", "family"] if c in sample.columns],
+                labels={"actual_sales": "Actual sales", "predicted_sales": "Predicted sales"},
+            )
+            fig.add_shape(
+                type="line", x0=0, y0=0,
+                x1=max(1, safe_float(sample["actual_sales"].max())),
+                y1=max(1, safe_float(sample["actual_sales"].max())),
+                line=dict(dash="dash", color=COLORS["red"]),
+            )
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
+            add_csv_download(sample, "backtesting_prediction_sample.csv")
+
+    st.markdown(
+        '<div class="section-note"><b>Interpretation:</b> Stage 15 '
+        'evaluated two forecast origins. Results are useful research evidence, '
+        'but they do not prove robustness across every season or future market '
+        'condition. WAPE is an error metric, not a generic accuracy score.</div>',
+        unsafe_allow_html=True,
+    )
+
+    section_header("Six-Model Comparison", "Run six methods on the same chronological holdout and identify the lowest-error model.")
+    st.markdown(
+        '<div class="section-note"><b>Transparency:</b> The existing saved reports and backtesting explorer above are preserved. '
+        'This additional comparison uses the saved XGBoost model plus five methods trained/evaluated on demand.</div>',
+        unsafe_allow_html=True,
+    )
+    eval_days = st.selectbox("Six-model holdout length (days)", [14, 28, 42], index=1, key="six_eval_days")
+    if st.button("Run six-model evaluation", type="primary", key="run_six_model_evaluation"):
+        try:
+            with st.spinner("Building time-series features and evaluating six methods. This may take a few minutes..."):
+                result, predictions, eval_train, eval_test = run_six_method_evaluation(
+                    sales, model, int(eval_days)
+                )
+            st.session_state["six_model_eval_results"] = result
+            st.session_state["six_model_eval_predictions"] = predictions
+            st.session_state["six_model_eval_train_rows"] = len(eval_train)
+            st.session_state["six_model_eval_test_rows"] = len(eval_test)
+            st.session_state["six_model_eval_days"] = int(eval_days)
+            st.success("Six-method evaluation completed using the selected chronological holdout.")
+        except Exception as exc:
+            st.error(f"Six-model evaluation failed: {exc}")
+
+    results = st.session_state.get("six_model_eval_results")
+    if isinstance(results, pd.DataFrame) and not results.empty:
+        valid = results[pd.to_numeric(results["WAPE_percent"], errors="coerce").notna()].copy()
+        st.caption(
+            f"Holdout: {st.session_state.get('six_model_eval_days', eval_days)} days | "
+            f"Training rows: {st.session_state.get('six_model_eval_train_rows', 0):,} "
+            f"(maximum 60,000 for resource limits) | "
+            f"Holdout rows: {st.session_state.get('six_model_eval_test_rows', 0):,}. "
+            "This is one-step evaluation with observed historical lag values, not recursive multi-day forecast accuracy."
+        )
+        st.dataframe(results, use_container_width=True, hide_index=True)
+        if not valid.empty:
+            best = valid.sort_values("WAPE_percent", ascending=True).iloc[0]
+            a, b, c = st.columns(3)
+            a.metric("Best model by WAPE", str(best["Model"]))
+            b.metric("Lowest WAPE", f"{best['WAPE_percent']:.2f}%")
+            c.metric("Best MAE", f"{valid['MAE'].min():.3f}")
+            chart = valid.sort_values("WAPE_percent", ascending=True)
+            fig = px.bar(chart, x="Model", y="WAPE_percent", text="WAPE_percent",
+                         labels={"WAPE_percent": "WAPE (%)"})
+            fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+            st.plotly_chart(make_chart_theme(fig, height=450), use_container_width=True)
+        add_csv_download(results, "six_model_evaluation_results.csv")
+        st.markdown("### How to interpret the results")
+        st.write("- **MAE:** average absolute prediction error; lower is better.")
+        st.write("- **RMSE:** penalizes large errors more heavily; lower is better.")
+        st.write("- **WAPE:** total absolute error divided by total actual sales; lower is better.")
+        st.write("- **Mean bias:** average prediction minus actual sales; positive means overprediction.")
+        st.info("The model with the lowest WAPE is marked best for this holdout only. That does not prove it will be best across every season or forecast horizon.")
+    else:
+        st.info("Click **Run six-model evaluation** to calculate results. No metrics are pre-filled or fabricated.")
+
+# ================================================================
+# STORE & PRODUCT ANALYTICS
+# ================================================================
 
 elif page == "Store & Product Analytics":
-    show_hero("Store & Product Analytics", "Compare demand concentration, replenishment needs, and risk across retail segments.")
-    tab1, tab2 = st.tabs(["📊 Store performance", "🔒 Product-family performance"])
-    fc = current_forecast(7)
-    if not fc.empty:
-        with tab1:
-            store_fc = fc.groupby("store_nbr", as_index=False)["forecast_demand"].sum().sort_values("store_nbr")
-            fig = px.bar(store_fc, x="store_nbr", y="forecast_demand", title="7-day demand by store")
-            fig.update_traces(marker_color=C["blue"])
-            chart_layout(fig, 390)
-            store_hist = filtered.groupby("store_nbr", as_index=False)["sales"].sum().sort_values("sales", ascending=False)
-            st.markdown("#### Historical sales by store")
-            fig = px.bar(store_hist, x="store_nbr", y="sales")
-            fig.update_traces(marker_color=C["teal"])
-            chart_layout(fig, 350)
-            st.dataframe(store_fc.sort_values("forecast_demand", ascending=False), use_container_width=True, hide_index=True)
-        with tab2:
-            family_fc = fc.groupby("family", as_index=False)["forecast_demand"].sum().sort_values("forecast_demand", ascending=False)
-            fig = px.bar(family_fc.head(20).sort_values("forecast_demand"), x="forecast_demand", y="family", orientation="h", title="7-day forecast by product family")
-            fig.update_traces(marker_color=C["blue"])
-            chart_layout(fig, 500)
-            family_hist = filtered.groupby("family", as_index=False)["sales"].sum().sort_values("sales", ascending=False)
-            st.markdown("#### Historical sales by product family")
-            st.dataframe(family_hist, use_container_width=True, hide_index=True)
+    section_header(
+        "Store & Product Analytics",
+        "Rankings and patterns are calculated from the selected historical data."
+    )
+
+    data = filtered_sales.copy()
+    if data.empty:
+        st.warning("No historical rows match the current dashboard filters.")
     else:
-        st.warning("No forecasts available for the current selection.")
+        store_stats = (
+            data.groupby("store_nbr", as_index=False)
+            .agg(
+                total_sales=("sales", "sum"),
+                average_row_sales=("sales", "mean"),
+                active_days=("date", "nunique"),
+                product_families=("family", "nunique"),
+            )
+            .sort_values("total_sales", ascending=False)
+        )
+        family_stats = (
+            data.groupby("family", as_index=False)
+            .agg(
+                total_sales=("sales", "sum"),
+                average_row_sales=("sales", "mean"),
+                stores_covered=("store_nbr", "nunique"),
+                active_days=("date", "nunique"),
+            )
+            .sort_values("total_sales", ascending=False)
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            section_header("Store performance")
+            fig = px.bar(
+                store_stats.sort_values("total_sales").tail(20),
+                x="total_sales", y="store_nbr", orientation="h",
+                labels={"total_sales": "Total sales", "store_nbr": "Store"},
+            )
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
+            st.dataframe(store_stats, use_container_width=True, hide_index=True)
+            add_csv_download(store_stats, "store_performance.csv")
+
+        with c2:
+            section_header("Product-family performance")
+            fig = px.bar(
+                family_stats.sort_values("total_sales").tail(20),
+                x="total_sales", y="family", orientation="h",
+                labels={"total_sales": "Total sales", "family": "Family"},
+            )
+            st.plotly_chart(make_chart_theme(fig), use_container_width=True)
+            st.dataframe(family_stats, use_container_width=True, hide_index=True)
+            add_csv_download(family_stats, "product_family_performance.csv")
+
+        section_header("Store × product-family matrix")
+        pivot = data.pivot_table(
+            index="family", columns="store_nbr", values="sales",
+            aggfunc="sum", fill_value=0,
+        )
+        fig = px.imshow(
+            pivot,
+            aspect="auto",
+            labels=dict(x="Store", y="Product family", color="Sales"),
+            color_continuous_scale="Teal",
+        )
+        st.plotly_chart(make_chart_theme(fig, height=520), use_container_width=True)
+
+# ================================================================
+# BUSINESS INTELLIGENCE
+# ================================================================
 
 elif page == "Business Intelligence":
-    show_hero("Business Intelligence", "Business summaries and demand concentration derived from the selected historical scope.")
-    if filtered.empty:
-        st.warning("No data matches the current global filters.")
+    section_header(
+        "Business Intelligence",
+        "Evidence-based descriptive insights from the historical dataset "
+        "and saved forecast evaluation."
+    )
+
+    data = filtered_sales.copy()
+    if data.empty:
+        st.warning("No data is available for the selected filters.")
     else:
-        daily = filtered.groupby("date", as_index=False)["sales"].sum()
-        family = filtered.groupby("family", as_index=False)["sales"].sum().sort_values("sales", ascending=False)
-        store = filtered.groupby("store_nbr", as_index=False)["sales"].sum().sort_values("sales", ascending=False)
-        top_share = float(family.head(5)["sales"].sum() / family["sales"].sum() * 100) if family["sales"].sum() else 0
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total observed sales", money(filtered["sales"].sum()))
-        c2.metric("Peak sales day", f"{daily.loc[daily.sales.idxmax(), 'date']:%d %b %Y}")
-        c3.metric("Top 5 family share", f"{top_share:.1f}%")
-        c4.metric("Highest-sales store", int(store.iloc[0]["store_nbr"]) if not store.empty else "—")
-        fig = px.line(daily, x="date", y="sales", title="Historical sales trend")
-        fig.update_traces(line_color=C["blue"])
-        chart_layout(fig, 370)
-        col1, col2 = st.columns(2)
-        with col1:
-            fig = px.pie(family.head(10), values="sales", names="family", title="Top product-family contribution")
-            chart_layout(fig, 400)
-        with col2:
-            fig = px.bar(store.head(15).sort_values("sales"), x="sales", y="store_nbr", orientation="h", title="Top 15 stores by historical sales")
-            fig.update_traces(marker_color=C["blue"])
-            chart_layout(fig, 400)
+        family_totals = (
+            data.groupby("family")["sales"].sum().sort_values(ascending=False)
+        )
+        store_totals = (
+            data.groupby("store_nbr")["sales"].sum().sort_values(ascending=False)
+        )
+        daily = daily_history(data)
+        peak_day = daily.loc[daily["sales"].idxmax()] if not daily.empty else None
+        low_day = daily.loc[daily["sales"].idxmin()] if not daily.empty else None
+
+        total = float(data["sales"].sum())
+        top_family = family_totals.index[0] if len(family_totals) else "N/A"
+        top_family_share = (
+            100 * float(family_totals.iloc[0]) / total if total > 0 else 0
+        )
+        top_store = int(store_totals.index[0]) if len(store_totals) else None
+
+        a, b, c = st.columns(3)
+        a.metric("Highest-sales product family", str(top_family))
+        b.metric("Top family share of sales", f"{top_family_share:.1f}%")
+        c.metric("Highest-sales store", str(top_store) if top_store is not None else "—")
+
         st.markdown("### Key findings")
-        st.write(f"- Top five product families account for **{top_share:.1f}%** of observed sales in the selected scope.")
-        st.write(f"- Highest-sales store in the current scope: **Store {int(store.iloc[0]['store_nbr'])}**.")
-        st.write(f"- Historical peak daily sales: **{money(daily['sales'].max())}**.")
-        st.download_button("Download BI summary — daily sales", daily.to_csv(index=False).encode(), "business_intelligence_daily_sales.csv", "text/csv")
+        st.write(
+            f"- **Product concentration:** {top_family} is the highest-sales "
+            f"family in the selected data, contributing {top_family_share:.1f}% "
+            f"of total recorded sales."
+        )
+        st.write(
+            f"- **Store performance:** Store {top_store} has the largest "
+            f"recorded sales total in the selected scope."
+        )
+        if peak_day is not None:
+            st.write(
+                f"- **Peak observed day:** {pd.Timestamp(peak_day['date']):%Y-%m-%d}, "
+                f"with total daily sales of {peak_day['sales']:,.2f}."
+            )
+        if low_day is not None:
+            st.write(
+                f"- **Lowest observed day:** {pd.Timestamp(low_day['date']):%Y-%m-%d}, "
+                f"with total daily sales of {low_day['sales']:,.2f}."
+            )
+
+        if not stage15_overall.empty:
+            st.markdown("### Forecast reliability evidence")
+            st.dataframe(stage15_overall, use_container_width=True, hide_index=True)
+            st.caption(
+                "The saved cross-origin evaluation used two forecast origins. "
+                "Use the results as limited validation evidence, not a guarantee "
+                "of future performance."
+            )
+
+        st.markdown("### Business implications")
+        st.write(
+            "- High-volume families may deserve more frequent monitoring, "
+            "but sales volume alone does not determine profitability."
+        )
+        st.write(
+            "- Store-level comparisons can help prioritize further analysis, "
+            "but differences may reflect store size, location, or assortment."
+        )
+        st.write(
+            "- Forecast-based inventory planning should be reviewed alongside "
+            "real stock, supplier lead time, shelf life, costs, and purchase orders."
+        )
+
+        insight_export = pd.DataFrame([
+            {"insight": "Top product family", "value": top_family},
+            {"insight": "Top family share percent", "value": top_family_share},
+            {"insight": "Top store", "value": top_store},
+            {"insight": "Selected historical sales total", "value": total},
+        ])
+        add_csv_download(insight_export, "business_intelligence_summary.csv")
+
+# ================================================================
+# DATA QUALITY & EXPLORER
+# ================================================================
 
 elif page == "Data Quality & Explorer":
-    show_hero("Data Quality & Explorer", "Inspect the source dataset, missing values, date coverage, and current filtered records.")
-    # Data is aggregated by date/store/family during loading. These are post-cleaning checks.
-    raw = sales_all
-    dup_after_aggregation = int(raw.duplicated(["date", "store_nbr", "family"]).sum())
-    missing_by_col = raw.isna().sum().rename("missing_values").reset_index().rename(columns={"index": "column"})
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Usable rows", f"{len(raw):,}")
-    c2.metric("Stores", raw["store_nbr"].nunique())
-    c3.metric("Product families", raw["family"].nunique())
-    c4.metric("Duplicate keys after aggregation", dup_after_aggregation)
-    st.caption("Duplicate-key count is measured after the app's defensive aggregation; it is not a count of duplicates in the untouched raw source.")
-    st.markdown("### Date coverage")
-    st.write(f"**Start:** {raw['date'].min():%Y-%m-%d}  |  **End:** {raw['date'].max():%Y-%m-%d}  |  **Distinct dates:** {raw['date'].nunique():,}")
-    st.markdown("### Missing values in loaded data")
-    st.dataframe(missing_by_col, use_container_width=True, hide_index=True)
+    section_header(
+        "Data Quality & Explorer",
+        "Inspect the actual loaded dataset. Data-quality checks below are "
+        "calculated from the release dataset at runtime."
+    )
+
+    data = sales.copy()
+    a, b, c, d = st.columns(4)
+    a.metric("Rows loaded", fmt_number(len(data)))
+    b.metric("Date coverage", f"{data['date'].min():%Y-%m-%d} → {data['date'].max():%Y-%m-%d}")
+    c.metric("Stores", fmt_number(data["store_nbr"].nunique()))
+    d.metric("Product families", fmt_number(data["family"].nunique()))
+
+    quality = pd.DataFrame({
+        "column": data.columns,
+        "dtype": [str(data[c].dtype) for c in data.columns],
+        "missing_values": [int(data[c].isna().sum()) for c in data.columns],
+        "missing_percent": [
+            100 * data[c].isna().mean() for c in data.columns
+        ],
+        "unique_values": [int(data[c].nunique(dropna=True)) for c in data.columns],
+    })
+    st.markdown("### Column-level quality")
+    st.dataframe(quality, use_container_width=True, hide_index=True)
+    add_csv_download(quality, "data_quality_report.csv")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Duplicate date/store/family keys", fmt_number(
+        int(data.duplicated(["date", "store_nbr", "family"]).sum())
+    ))
+    c2.metric("Negative sales rows", fmt_number(int((data["sales"] < 0).sum())))
+    c3.metric("Missing sales rows", fmt_number(int(data["sales"].isna().sum())))
+
     st.markdown("### Explore records")
-    q1, q2 = st.columns(2)
-    with q1:
-        explore_store = st.selectbox("Store", ["All"] + stores_all, key="explore_store")
-    with q2:
-        explore_family = st.selectbox("Product family", ["All"] + families_all, key="explore_family")
-    explore = raw.copy()
-    if explore_store != "All":
-        explore = explore[explore["store_nbr"] == explore_store]
-    if explore_family != "All":
-        explore = explore[explore["family"] == explore_family]
-    st.dataframe(explore.head(5000), use_container_width=True, hide_index=True)
-    st.caption(f"Showing up to 5,000 of {len(explore):,} matching rows.")
-    st.download_button("Download explored data", explore.to_csv(index=False).encode(), "explored_sales_data.csv", "text/csv")
+    c1, c2, c3 = st.columns(3)
+    quality_stores = c1.multiselect(
+        "Store filter", stores_all, default=filters["stores"]
+    )
+    quality_families = c2.multiselect(
+        "Family filter", families_all, default=filters["families"]
+    )
+    max_rows = c3.selectbox("Maximum rows to display", [100, 500, 1000, 5000])
 
-# ---------- Footer / reproducibility ----------
+    data_view = data[
+        data["store_nbr"].isin(quality_stores)
+        & data["family"].isin(quality_families)
+        & data["date"].between(
+            pd.Timestamp(filters["start"]),
+            pd.Timestamp(filters["end"]),
+        )
+    ].sort_values("date", ascending=False)
 
-st.markdown("---")
-st.caption(
-    f"Demand Intelligence · Data: {DATA_PATH.name} · Historical dates: "
-    f"{first_history_date:%Y-%m-%d} to {last_history_date:%Y-%m-%d}. "
-    "Forecasts are estimates. Inventory and what-if outputs are simulated."
+    st.caption(
+        f"{len(data_view):,} rows match the selected filters. "
+        f"The table displays at most {max_rows:,} rows."
+    )
+    st.dataframe(
+        data_view.head(max_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+    add_csv_download(data_view, "data_explorer_filtered_records.csv")
+
+# ================================================================
+# FOOTER
+# ================================================================
+
+st.divider()
+st.markdown(
+    """
+    <p class="small-muted">
+    AI-Powered Demand Forecasting and Inventory Optimization System for
+    Supermarket Retail | Research prototype | Streamlit + Plotly +
+    original trained machine-learning pipeline
+    </p>
+    """,
+    unsafe_allow_html=True,
 )
