@@ -807,8 +807,8 @@ elif page == "Demand Forecasting":
     horizon = c1.selectbox(
         "Forecast horizon (days)", [7, 14, 30, 60], index=0
     )
-    store_options = filters["stores"]
-    family_options = filters["families"]
+    store_options = stores_all
+    family_options = families_all
     forecast_store = c2.selectbox("Store", store_options)
     forecast_family = c3.selectbox("Product family", family_options)
 
@@ -850,6 +850,25 @@ elif page == "Demand Forecasting":
             fig.update_traces(line=dict(color=COLORS["teal"], width=3))
             st.plotly_chart(make_chart_theme(fig), use_container_width=True)
             add_csv_download(selected, "demand_forecast.csv")
+            hist_selected = sales[(sales["store_nbr"] == forecast_store) & (sales["family"] == forecast_family)].sort_values("date")
+            with st.expander("Check recent historical demand for this selection"):
+                if hist_selected.empty:
+                    st.warning("No historical sales rows exist for this store/product selection.")
+                else:
+                    st.write(f"Historical rows: {len(hist_selected):,} · Latest observed sales: {hist_selected.iloc[-1]['sales']:,.2f}")
+                    st.dataframe(hist_selected.tail(28), use_container_width=True, hide_index=True)
+            if float(selected["predicted_sales"].sum()) <= 0:
+                st.warning(
+                    "The saved model predicted zero demand for this store/product and horizon. "
+                    "This may reflect a genuinely low/zero-sales series or a model/feature mismatch; "
+                    "do not interpret it as proof that no stock is required. Check the product-family "
+                    "historical sales below before planning stock."
+                )
+            else:
+                st.success(
+                    f"Planning estimate: approximately {selected['predicted_sales'].sum():,.2f} "
+                    f"sales units over {len(selected)} forecast days for the selected store and family."
+                )
 
             st.dataframe(
                 selected[[
@@ -874,9 +893,9 @@ elif page == "Inventory Optimization":
     )
 
     c1, c2, c3 = st.columns(3)
-    inv_store = c1.selectbox("Store", filters["stores"], key="inv_store")
+    inv_store = c1.selectbox("Store", stores_all, key="inv_store")
     inv_family = c2.selectbox(
-        "Product family", filters["families"], key="inv_family"
+        "Product family", families_all, key="inv_family"
     )
     lead_time = c3.number_input(
         "Assumed supplier lead time (days)", 1, 90, 7
@@ -981,10 +1000,7 @@ elif page == "Smart Alerts":
                 str(DATA_PATH), DATA_PATH.stat().st_mtime,
                 str(MODEL_PATH), MODEL_PATH.stat().st_mtime,
             )
-            scope = future[
-                future["store_nbr"].isin(filters["stores"])
-                & future["family"].isin(filters["families"])
-            ]
+            scope = future.copy()
             totals = (
                 scope.groupby(["store_nbr", "family"], as_index=False)
                 .agg(
@@ -993,10 +1009,7 @@ elif page == "Smart Alerts":
                     peak_daily_forecast=("predicted_sales", "max"),
                 )
             )
-            historical = sales[
-                sales["store_nbr"].isin(filters["stores"])
-                & sales["family"].isin(filters["families"])
-            ].copy()
+            historical = sales.copy()
 
             recent_date = historical["date"].max()
             last7 = historical[
@@ -1091,10 +1104,10 @@ elif page == "Sales Explorer":
 
     c1, c2, c3 = st.columns(3)
     explorer_stores = c1.multiselect(
-        "Stores", filters["stores"], default=filters["stores"]
+        "Stores", stores_all, default=stores_all
     )
     explorer_families = c2.multiselect(
-        "Product families", filters["families"], default=filters["families"]
+        "Product families", families_all, default=families_all
     )
     grain = c3.selectbox("Time aggregation", ["Daily", "Weekly", "Monthly"])
 
@@ -1102,8 +1115,8 @@ elif page == "Sales Explorer":
         sales["store_nbr"].isin(explorer_stores)
         & sales["family"].isin(explorer_families)
         & sales["date"].between(
-            pd.Timestamp(filters["start"]),
-            pd.Timestamp(filters["end"]),
+            first_history_date,
+            last_history_date,
         )
     ].copy()
 
@@ -1159,9 +1172,9 @@ elif page == "What-if Simulator":
     )
 
     c1, c2 = st.columns(2)
-    sim_store = c1.selectbox("Store", filters["stores"], key="sim_store")
+    sim_store = c1.selectbox("Store", stores_all, key="sim_store")
     sim_family = c2.selectbox(
-        "Product family", filters["families"], key="sim_family"
+        "Product family", families_all, key="sim_family"
     )
 
     c1, c2, c3 = st.columns(3)
@@ -1454,9 +1467,9 @@ elif page == "Store & Product Analytics":
         "Rankings and patterns are calculated from the selected historical data."
     )
 
-    data = filtered_sales.copy()
+    data = sales.copy()
     if data.empty:
-        st.warning("No historical rows match the current dashboard filters.")
+        st.warning("No historical rows are available in the dataset.")
     else:
         store_stats = (
             data.groupby("store_nbr", as_index=False)
@@ -1526,9 +1539,9 @@ elif page == "Business Intelligence":
         "and saved forecast evaluation."
     )
 
-    data = filtered_sales.copy()
+    data = sales.copy()
     if data.empty:
-        st.warning("No data is available for the selected filters.")
+        st.warning("No data is available in the dataset.")
     else:
         family_totals = (
             data.groupby("family")["sales"].sum().sort_values(ascending=False)
@@ -1656,8 +1669,8 @@ elif page == "Data Quality & Explorer":
         data["store_nbr"].isin(quality_stores)
         & data["family"].isin(quality_families)
         & data["date"].between(
-            pd.Timestamp(filters["start"]),
-            pd.Timestamp(filters["end"]),
+            first_history_date,
+            last_history_date,
         )
     ].sort_values("date", ascending=False)
 
